@@ -1,0 +1,10 @@
+# Commit only JSON/CSV/MD results; never caches, tensors, logs.
+__pycache__/
+*.pt
+*.log
+runs/**/caches/
+runs/**/outputs/
+runs/**/code/
+runs/**/logs/
+runs/**/*.jsonl
+runs/**/cache/

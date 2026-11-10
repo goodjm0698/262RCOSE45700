@@ -1,0 +1,121 @@
+"""Build BERT/RESULTS.md from a finished run. ViT results are read only.
+Usage: python bert_report.py --run-dir runs/ID [--notes notes.md]
+"""
+import argparse
+import csv
+import statistics as st
+from pathlib import Path
+from common import read_json
+
+VIT_RUN = Path('/root/ViT/vit_pilot/fastpath_compare_runs/20261104T172746Z-e1b86b')   # read only
+
+
+def f(x, d=2):
+    if x is None: return '—'
+    if isinstance(x, (int,)) and not isinstance(x, bool): return f'{x:,}'
+    return f'{x:,.{d}f}'
+
+
+def table(headers, rows):
+    return '| '+' | '.join(headers)+' |\n|'+'---|'*len(headers)+'\n'+''.join('| '+' | '.join(str(c) for c in r)+' |\n' for r in rows)+'\n'
+
+
+def rng(v, d=2, scale=1.0):
+    if not v or v['median'] is None: return '—'
+    return f"{f(v['median']*scale, d)} ({f(v['minimum']*scale, d)}~{f(v['maximum']*scale, d)})"
+
+
+def vit_tables():
+    rows = list(csv.DictReader(open(VIT_RUN/'trial_summary.csv')))
+    be = read_json(VIT_RUN/'break_even_summary.json'); cum = read_json(VIT_RUN/'cumulative_validation_summary.json')
+    oc = read_json(VIT_RUN/'output_comparison.json')['pairs']
+    out = {}
+    for b in [1, 4]:
+        d = {}
+        for mode in ['eager', 'compile']:
+            rs = [r for r in rows if int(r['batch']) == b and r['mode'] == mode]
+            d[mode] = {k: st.median(float(r[k]) for r in rs) for k in ['first_call_ms', 'A_ms', 'mean_ms']}
+        tr = [t for t in be['trials'] if t['batch'] == b]
+        d['speedup'] = st.median(t['compile_speedup'] for t in tr)
+        d['N_win'] = next(x for x in be['batches'] if x['batch'] == b)['N_win']
+        d['cum'] = next(x for x in cum['batches'] if x['batch'] == b)
+        d['out'] = next(p for p in oc if (p['stage'], p['batch'], p['trial']) == ('performance', b, 1))
+        out[b] = d
+    return out
+
+
+def report(run, notes=None):
+    run = Path(run); cfg = read_json(run/'config.json'); m = read_json(run/'manifest.json')
+    be = read_json(run/'break_even_summary.json'); oc = read_json(run/'output_comparison.json')['pairs']
+    cum = read_json(run/'cumulative_validation_summary.json')
+    batches = {b['batch']: b for b in be['batches']}
+    devcfg = next((s for s in [read_json(p).get('effective', {}).get('device_configuration') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
+    attn = next((s for s in [read_json(p).get('attn_implementation') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
+    t = f"# BERT-base NPU 측정 결과 (ViT 방식)\n\n실행 ID `{cfg['run_id']}`. 원본은 `BERT/vitstyle/runs/{cfg['run_id']}/`에 있음.\n\n"
+    t += "## 실험 조건\n\n"
+    t += (f"- 모델: `{cfg['model']}`, BF16, 길이 {cfg['seq_len']}, `cpu_fallback=False`, attention 구현 `{attn}`\n"
+          f"- 마스크: `create_bidirectional_mask`를 passthrough로 패치하고 4D additive mask를 CPU에서 만들어 NPU로 넘김 (step4 방식)\n"
+          f"- 입력: step4의 실제 문장을 128로 패딩함. B1은 1번 문장, B4는 1~4번 문장\n"
+          f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n"
+          f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}회 실행하고 중앙값을 씀. 실행 순서는 ViT와 같이 회차마다 바꿈\n"
+          f"- 캐시: 실행마다 `runs/<id>/caches/<stage>/<case>`를 새로 만들어 씀. 팀 공용 캐시는 사용하지 않음\n"
+          f"- 타이머: `stream.synchronize()` → `perf_counter_ns` → `runner(**inputs)` → `stream.synchronize()`. 입력 전송과 출력 CPU 복사는 타이머 밖임\n"
+          f"- A = runner 준비(S) + 첫 호출(F) + 워밍업 합(W). 모델 로드와 NPU 전송 시간은 제외함. T(N) = A + N × 반복 평균\n"
+          f"- NPU 사용 시간 합계 {m['npu_budget_used_s']:.0f}초 (예산 {cfg['total_budget_s']}초)\n\n")
+    t += "## 표 1. 시간 측정 (3회 중앙값, 괄호는 min~max)\n\n"
+    for b in [1, 4]:
+        x = batches[b]
+        rows = [[mode, rng(x['first_call_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['warmup_sum_ms_by_mode'][mode]),
+                 rng(x['A_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['mean_ms_by_mode'][mode], 3), rng(x['CV_by_mode'][mode], 4)]
+                for mode in ['eager', 'compile']]
+        t += f"**batch {b}**\n\n"+table(['모드', '첫 호출', '워밍업 합 (ms)', 'A', '반복 평균 ms', 'CV'], rows)
+    t += "## 표 2. 배속 (eager 반복 평균 / compile 반복 평균, 같은 회차끼리 계산)\n\n"
+    t += table(['batch', 't1', 't2', 't3', '중앙값'], [[b]+[f(batches[b]['per_trial_speedup'].get(str(i), batches[b]['per_trial_speedup'].get(i)), 3) for i in [1, 2, 3]]
+                                                    +[f(batches[b]['compile_speedup']['median'], 3)] for b in [1, 4]])
+    t += "## 표 3. 손익분기점\n\n"
+    rows = []
+    for b in [1, 4]:
+        c = next(x for x in cum['batches'] if x['batch'] == b)
+        keep = {True: '유지됨', False: '유지 안 됨'}.get(c.get('maintained_after_crossing'), '—')
+        rows.append([b, rng(batches[b]['N_win'], 0), f(c['first_observed_compile_advantage_N']), f"{keep} (N={f(c['completed_common_calls'])}까지 관측)",
+                     c['status']])
+    t += table(['batch', '예측 N_win 중앙값 (min~max)', '실측 교차 N', '교차 후 우위', '상태'], rows)
+    t += "N은 첫 호출과 워밍업 5회를 마친 뒤 추가로 호출한 횟수임. 실측은 별도 프로세스와 새 캐시에서 대표 회차(N_win이 중앙값인 회차)의 예측값과 비교함.\n\n"
+    t += "## 표 4. 출력 비교 (eager vs compile, BF16 logits를 CPU FP32로 바꿔 비교)\n\n"
+    rows = []
+    for st_, label in [('outcmp', '16문장 (출력 비교 worker)'), ('performance', '성능 측정 출력 (마지막 반복, 3회 중 최악값)')]:
+        for b in [1, 4]:
+            ps = [p for p in oc if (p['stage'], p['batch']) == (st_, b) and p.get('structural_finite_ok')]
+            if not ps: rows.append([label, b, '—', '—', '—', '—', '—']); continue
+            n = ps[0]['compared_samples']
+            rows.append([label, b, f(max(p['max_abs_error'] for p in ps), 4), f(max(p['mean_abs_error'] for p in ps), 4),
+                         f(min(p['cosine_mean'] for p in ps), 6), f(min(p['cosine_min'] for p in ps), 6),
+                         f"{min(p['top1_matches'] for p in ps)}/{n}"])
+    t += table(['입력', 'batch', '최대 절대오차', '평균 절대오차', 'cosine 평균', 'cosine 최소', 'Top-1 일치'], rows)
+    t += "허용 오차 기준은 아직 정하지 않았으므로 합격 판정은 하지 않음(pending). BERT logits는 2차원이라 cosine이 높게 나오기 쉬움.\n\n"
+    v = vit_tables()
+    t += "## ViT와 비교 (같은 측정 방식, ViT 결과는 읽기만 함)\n\n"
+    rows = []
+    for b in [1, 4]:
+        x = batches[b]; c = next(y for y in cum['batches'] if y['batch'] == b); bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
+        for name, d in [('BERT', None), ('ViT', v[b])]:
+            if d is None:
+                rows.append([b, name, f(x['first_call_ms_by_mode']['eager']['median']/1e3, 1)+' / '+f(x['first_call_ms_by_mode']['compile']['median']/1e3, 1),
+                             f(x['mean_ms_by_mode']['eager']['median'], 3)+' / '+f(x['mean_ms_by_mode']['compile']['median'], 3),
+                             f(x['compile_speedup']['median'], 2), f(x['N_win']['median'], 0), f(c['first_observed_compile_advantage_N']),
+                             f(bo.get('cosine_min'), 6)])
+            else:
+                rows.append([b, name, f(d['eager']['first_call_ms']/1e3, 1)+' / '+f(d['compile']['first_call_ms']/1e3, 1),
+                             f(d['eager']['mean_ms'], 3)+' / '+f(d['compile']['mean_ms'], 3), f(d['speedup'], 2), f(d['N_win']['median'], 0),
+                             f(d['cum']['first_observed_compile_advantage_N']), f(d['out'].get('cosine_min'), 6)])
+    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 E / C (ms)', '배속', '예측 N_win', '실측 교차 N', 'cosine 최소'], rows)
+    t += f"ViT 원본: `{VIT_RUN}` (torchvision vit_b_16, 입력 224×224, MHA fastpath는 꺼짐). 두 모델의 연산량이 달라서 절대 시간을 같은 기준으로 비교할 수는 없음.\n\n"
+    if notes and Path(notes).exists(): t += Path(notes).read_text()
+    out = run.parents[2]/'RESULTS.md'    # BERT/RESULTS.md
+    out.write_text(t)
+    return out
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(); p.add_argument('--run-dir', type=Path, required=True); p.add_argument('--notes', type=Path)
+    a = p.parse_args(); print(report(a.run_dir.resolve(), a.notes))

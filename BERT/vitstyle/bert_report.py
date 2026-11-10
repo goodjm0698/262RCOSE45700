@@ -39,7 +39,7 @@ def report(run, notes=None):
     bl = cfg.get('batches', [1, 4])
     devcfg = next((s for s in [read_json(p).get('effective', {}).get('device_configuration') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
     attn = next((s for s in [read_json(p).get('attn_implementation') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
-    t = f"# BERT-base NPU 측정 결과 (ViT 방식)\n\n실행 ID `{cfg['run_id']}`. 원본은 `BERT/vitstyle/runs/{cfg['run_id']}/`에 있음.\n\n"
+    t = f"# BERT-base NPU 측정 결과\n\n실행 ID `{cfg['run_id']}`. 원본은 `BERT/vitstyle/runs/{cfg['run_id']}/`에 있음.\n\n"
     t += "## 실험 조건\n\n"
     t += (f"- 모델: `{cfg['model']}`, BF16, 길이 {cfg['seq_len']}, `cpu_fallback=False`, attention 구현 `{attn}`\n"
           f"- 마스크: `create_bidirectional_mask`를 passthrough로 패치하고 4D additive mask를 CPU에서 만들어 NPU로 넘김 (step4 방식)\n"

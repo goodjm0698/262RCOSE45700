@@ -63,6 +63,10 @@ def report(run, notes=None):
           f"- 타이머: `stream.synchronize()` → `perf_counter_ns` → `runner(**inputs)` → `stream.synchronize()`. 입력 전송과 출력 CPU 복사는 타이머 밖임\n"
           f"- A = runner 준비(S) + 첫 호출(F) + 워밍업 합(W). 모델 로드와 NPU 전송 시간은 제외함. T(N) = A + N × 반복 평균\n"
           f"- NPU 사용 시간 합계 {m['npu_budget_used_s']:.0f}초 (예산 {cfg['total_budget_s']}초)\n\n")
+    bad = [w for w in m['workers'] if w['stage'] == 'performance' and w['status'] != 'ok']
+    if bad:
+        t += "## 정상 종료하지 않은 성능 측정 worker\n\n"+table(['case', '상태', '사유'], [
+            [w['case_id'], w['status'], (w.get('reason') or '')+(f" ({w['skipped_because']})" if w.get('skipped_because') else '')] for w in bad])
     t += "## 표 1. 시간 측정 (3회 중앙값, 괄호는 min~max)\n\n"
     for b in bl:
         x = batches[b]

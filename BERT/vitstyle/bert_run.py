@@ -4,6 +4,8 @@ Stages (each worker = new process + new private cache):
   performance : 3 trials x {eager,compile} x BATCHES, rotated order (reduces to ViT's for B1/B4)
   outcmp      : 16 step4 sentences, {eager,compile} x BATCHES (replaces ViT diagnostic gate)
 A failed/timed-out worker is recorded and the next worker starts; only a busy NPU stops the run.
+After one failure/timeout, that (mode, batch) is not launched in later trials: status 'skipped',
+reason '이전 세트 실패로 건너뜀', skipped_because=<failed case_id>.
   cumulative  : break-even validation, target = ceil(1.2*median N_win)
 Usage:
   python bert_run.py run                                  # new run dir, performance stage
@@ -26,6 +28,8 @@ HERE = Path(__file__).resolve().parent
 SOURCES = ['bert_run.py', 'bert_worker.py', 'bert_model.py', 'bert_math.py', 'bert_analyze.py', 'common.py']
 WORKER_SOURCES = ['bert_worker.py', 'bert_model.py', 'common.py']  # must not change mid-run
 STAGES = ['performance', 'outcmp', 'cumulative']
+FAILED = ['error', 'timeout']   # a (mode, batch) with one of these is skipped in later trials
+SKIP_REASON = '이전 세트 실패로 건너뜀'
 BATCHES = [1, 2, 4, 8, 16]   # length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
 
 
@@ -154,6 +158,13 @@ def advance(run, stage):
             if w['status'] not in ['not_run', 'held']: continue
             if stage == 'cumulative' and not w.get('target_calls'): continue
             if w['status'] == 'held' and w.get('reason', '').startswith('Overall'): continue
+            if stage == 'performance':
+                prev = next((p for p in m['workers'] if p['stage'] == 'performance' and (p['mode'], p['batch']) == (w['mode'], w['batch'])
+                             and p['trial'] < w['trial'] and p['status'] in FAILED), None)
+                if prev:
+                    w.update(status='skipped', reason=SKIP_REASON, skipped_because=prev['case_id'], skipped_utc=now())
+                    write_json(run/'manifest.json', m); ev.emit('worker_skipped', case_id=w['case_id'], because=prev['case_id'])
+                    continue
             launch(run, cfg, m, w, ev)
         m['status'] = 'finished_'+stage
     except NPUBusy as e:

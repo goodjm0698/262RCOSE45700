@@ -67,7 +67,10 @@ def vit_tables():
 def report(run, notes=None):
     run = Path(run); cfg = read_json(run/'config.json'); m = read_json(run/'manifest.json')
     be = read_json(run/'break_even_summary.json'); oc = read_json(run/'output_comparison.json')['pairs']
-    cum = read_json(run/'cumulative_validation_summary.json')
+    cp = run/'cumulative_validation_summary.json'
+    cum = read_json(cp) if cp.exists() else dict(batches=[])
+    cum_ran = any(w['stage'] == 'cumulative' and w.get('started_utc') for w in m['workers'])
+    cumb = lambda b: next((x for x in cum['batches'] if x['batch'] == b), {}) if cum_ran else {}   # {} -> '—'
     batches = {b['batch']: b for b in be['batches']}
     bl = cfg.get('batches', [1, 4])
     devcfg = next((s for s in [read_json(p).get('effective', {}).get('device_configuration') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
@@ -109,11 +112,12 @@ def report(run, notes=None):
     t += "## 표 3. 손익분기점\n\n"
     rows = []
     for b in bl:
-        c = next(x for x in cum['batches'] if x['batch'] == b)
+        c = cumb(b)
         keep = {True: '유지됨', False: '유지 안 됨'}.get(c.get('maintained_after_crossing'), '—')
-        rows.append([b, rng(batches[b]['N_win'], 0), f(c['first_observed_compile_advantage_N']), f"{keep} (N={f(c['completed_common_calls'])}까지 관측)",
-                     c['status']])
+        rows.append([b, rng(batches[b]['N_win'], 0), f(c.get('first_observed_compile_advantage_N')),
+                     f"{keep} (N={f(c.get('completed_common_calls'))}까지 관측)" if c else '—', c.get('status', '미실행')])
     t += table(['batch', '예측 N_win 중앙값 (min~max)', '실측 교차 N', '교차 후 우위', '상태'], rows)
+    if not cum_ran: t += "이번 실행에서는 cumulative 단계를 돌리지 않았음. 실측 칸은 비어 있고 예측값만 있음.\n\n"
     t += f"N은 첫 호출과 워밍업 {cfg['warmup']}회를 마친 뒤 추가로 호출한 횟수임. 실측은 별도 프로세스와 새 캐시에서 대표 회차(N_win이 중앙값인 회차)의 예측값과 비교함.\n\n"
     t += "## 표 4. 출력 비교 (eager vs compile, BF16 logits를 CPU FP32로 바꿔 비교)\n\n"
     rows = []
@@ -131,12 +135,12 @@ def report(run, notes=None):
     t += "## ViT와 비교 (같은 측정 방식, ViT 결과는 읽기만 함)\n\n"
     rows = []
     for b in [b for b in bl if b in v]:   # ViT measured only B1/B4
-        x = batches[b]; c = next(y for y in cum['batches'] if y['batch'] == b); bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
+        x = batches[b]; c = cumb(b); bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
         for name, d in [('BERT', None), ('ViT', v[b])]:
             if d is None:
                 rows.append([b, name, f(x['first_call_ms_by_mode']['eager']['median']/1e3, 1)+' / '+f(x['first_call_ms_by_mode']['compile']['median']/1e3, 1),
                              msd(x['pooled_repeat_by_mode']['eager'])+' / '+msd(x['pooled_repeat_by_mode']['compile']),
-                             f(x.get('pooled_speedup'), 2), f(x['N_win']['median'], 0), f(c['first_observed_compile_advantage_N']),
+                             f(x.get('pooled_speedup'), 2), f(x['N_win']['median'], 0), f(c.get('first_observed_compile_advantage_N')),
                              f(bo.get('cosine_min'), 6)])
             else:
                 rows.append([b, name, f(d['eager']['first_call_ms']/1e3, 1)+' / '+f(d['compile']['first_call_ms']/1e3, 1),

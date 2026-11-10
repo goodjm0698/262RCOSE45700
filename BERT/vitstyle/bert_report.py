@@ -132,21 +132,23 @@ def report(run, notes=None):
     t += table(['입력', 'batch', '최대 절대오차', '평균 절대오차', 'cosine 평균', 'cosine 최소', 'Top-1 일치'], rows)
     t += "허용 오차 기준은 아직 정하지 않았으므로 합격 판정은 하지 않음(pending). BERT logits는 2차원이라 cosine이 높게 나오기 쉬움.\n\n"
     v = vit_tables()
-    t += "## ViT와 비교 (같은 측정 방식, ViT 결과는 읽기만 함)\n\n"
+    vit_warmup = read_json(VIT_RUN/'config.json').get('warmup', '?')
+    t += f"## ViT와 반복 시간 비교 (워밍업: BERT {cfg['warmup']}회, ViT {vit_warmup}회, ViT 결과는 읽기만 함)\n\n"
     rows = []
     for b in [b for b in bl if b in v]:   # ViT measured only B1/B4
-        x = batches[b]; c = cumb(b); bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
+        x = batches[b]; bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
         for name, d in [('BERT', None), ('ViT', v[b])]:
+            # A and N_win (predicted/observed crossing) depend on the warmup count, so they are not in this table
             if d is None:
                 rows.append([b, name, f(x['first_call_ms_by_mode']['eager']['median']/1e3, 1)+' / '+f(x['first_call_ms_by_mode']['compile']['median']/1e3, 1),
                              msd(x['pooled_repeat_by_mode']['eager'])+' / '+msd(x['pooled_repeat_by_mode']['compile']),
-                             f(x.get('pooled_speedup'), 2), f(x['N_win']['median'], 0), f(c.get('first_observed_compile_advantage_N')),
-                             f(bo.get('cosine_min'), 6)])
+                             f(x.get('pooled_speedup'), 2), f(bo.get('cosine_min'), 6)])
             else:
                 rows.append([b, name, f(d['eager']['first_call_ms']/1e3, 1)+' / '+f(d['compile']['first_call_ms']/1e3, 1),
-                             msd(d['pooled']['eager'])+' / '+msd(d['pooled']['compile']), f(d['pooled_speedup'], 2), f(d['N_win']['median'], 0),
-                             f(d['cum']['first_observed_compile_advantage_N']), f(d['out'].get('cosine_min'), 6)])
-    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 ± SD E / C (ms)', '배속 (전체 평균끼리)', '예측 N_win', '실측 교차 N', 'cosine 최소'], rows)
+                             msd(d['pooled']['eager'])+' / '+msd(d['pooled']['compile']), f(d['pooled_speedup'], 2),
+                             f(d['out'].get('cosine_min'), 6)])
+    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 ± SD E / C (ms)', '배속 (전체 평균끼리)', 'cosine 최소'], rows)
+    t += "A와 N_win은 워밍업 횟수가 달라 직접 비교하지 않음.\n\n"
     t += f"ViT 원본: `{VIT_RUN}` (torchvision vit_b_16, 입력 224×224, MHA fastpath는 꺼짐). 두 모델의 연산량이 달라서 절대 시간을 같은 기준으로 비교할 수는 없음.\n\n"
     if notes and Path(notes).exists(): t += Path(notes).read_text()
     out = run.parents[2]/'RESULTS.md'    # BERT/RESULTS.md

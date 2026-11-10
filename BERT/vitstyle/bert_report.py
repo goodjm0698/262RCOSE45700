@@ -80,7 +80,7 @@ def report(run, notes=None):
         rows.append([b, rng(batches[b]['N_win'], 0), f(c['first_observed_compile_advantage_N']), f"{keep} (N={f(c['completed_common_calls'])}까지 관측)",
                      c['status']])
     t += table(['batch', '예측 N_win 중앙값 (min~max)', '실측 교차 N', '교차 후 우위', '상태'], rows)
-    t += "N은 첫 호출과 워밍업 5회를 마친 뒤 추가로 호출한 횟수임. 실측은 별도 프로세스와 새 캐시에서 대표 회차(N_win이 중앙값인 회차)의 예측값과 비교함.\n\n"
+    t += f"N은 첫 호출과 워밍업 {cfg['warmup']}회를 마친 뒤 추가로 호출한 횟수임. 실측은 별도 프로세스와 새 캐시에서 대표 회차(N_win이 중앙값인 회차)의 예측값과 비교함.\n\n"
     t += "## 표 4. 출력 비교 (eager vs compile, BF16 logits를 CPU FP32로 바꿔 비교)\n\n"
     rows = []
     for st_, label in [('outcmp', '16문장 (출력 비교 worker)'), ('performance', '성능 측정 출력 (마지막 반복, 3회 중 최악값)')]:

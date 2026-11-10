@@ -103,7 +103,7 @@ def worker_summary(run, w, cfg):
              model_id=cfg['model'], seq_len=cfg['seq_len'], dtype='torch.bfloat16', cpu_fallback=False,
              requested_repeats=cfg['repeats'], valid_repeats=len(vals),
              model_input_prepare_ms=r.get('model_input_prepare_ms'), runner_setup_ms=r.get('runner_setup_ms'),
-             first_call_ms=first[0] if len(first) == 1 else None, warmup_ms=warm,
+             first_call_ms=first[0] if len(first) == 1 else None, warmup_ms=warm, valid_warmups=len(warm),
              warmup_sum_ms=sum(warm) if len(warm) == cfg['warmup'] else None, A_ms=float(c['A']) if c['status'] == 'valid' else None,
              mean_ms=st.mean(vals) if vals else None, median_ms=st.median(vals) if vals else None,
              stdev_ms=st.stdev(vals) if len(vals) > 1 else None, CV=st.stdev(vals)/st.mean(vals) if len(vals) > 1 else None,

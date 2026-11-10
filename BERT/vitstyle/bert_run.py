@@ -65,7 +65,7 @@ def fresh(a):
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
                cumulative_target_rule='ceil(1.2 * median paired N_win); N_win=1 -> at least 20; cap/budget may shorten',
                cumulative_wall_bound_rule='1.5*max(new-trial prepare+A+N*t)/1000 +60 s +N*0.001 s per mode',
-               batches=BATCHES, worker_timeout_s=1800, total_budget_s=7200, warmup=10, repeats=50, trials=3, max_cumulative_calls=10000,
+               batches=BATCHES, worker_timeout_s=1800, total_budget_s=14400, warmup=10, repeats=50, trials=3, max_cumulative_calls=10000,
                hf_hub_offline=True)
     write_json(run/'config.json', cfg)
     workers = []

@@ -1,8 +1,9 @@
 """BERT ViT-style comparison orchestrator. Adapted from /root/ViT/vit_pilot/fastpath_compare.py.
 
 Stages (each worker = new process + new private cache):
-  performance : 3 trials x {eager,compile} x {B1,B4}, rotated order as in ViT
-  outcmp      : 16 step4 sentences, {eager,compile} x {B1,B4} (replaces ViT diagnostic gate)
+  performance : 3 trials x {eager,compile} x BATCHES, rotated order (reduces to ViT's for B1/B4)
+  outcmp      : 16 step4 sentences, {eager,compile} x BATCHES (replaces ViT diagnostic gate)
+A failed/timed-out worker is recorded and the next worker starts; only a busy NPU stops the run.
   cumulative  : break-even validation, target = ceil(1.2*median N_win)
 Usage:
   python bert_run.py run                                  # new run dir, performance stage
@@ -25,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 SOURCES = ['bert_run.py', 'bert_worker.py', 'bert_model.py', 'bert_math.py', 'bert_analyze.py', 'common.py']
 WORKER_SOURCES = ['bert_worker.py', 'bert_model.py', 'common.py']  # must not change mid-run
 STAGES = ['performance', 'outcmp', 'cumulative']
+BATCHES = [1, 2, 4, 8, 16]   # length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
 
 
 class NPUBusy(Exception):
@@ -63,7 +65,7 @@ def fresh(a):
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
                cumulative_target_rule='ceil(1.2 * median paired N_win); N_win=1 -> at least 20; cap/budget may shorten',
                cumulative_wall_bound_rule='1.5*max(new-trial prepare+A+N*t)/1000 +60 s +N*0.001 s per mode',
-               worker_timeout_s=1800, total_budget_s=7200, warmup=10, repeats=50, trials=3, max_cumulative_calls=10000,
+               batches=BATCHES, worker_timeout_s=1800, total_budget_s=7200, warmup=10, repeats=50, trials=3, max_cumulative_calls=10000,
                hf_hub_offline=True)
     write_json(run/'config.json', cfg)
     workers = []
@@ -71,18 +73,22 @@ def fresh(a):
         cid = f'{stage}_{mode}_b{b}_t{trial}'
         workers.append(dict(case_id=cid, root_case_id=cid, stage=stage, mode=mode, batch=b, trial=trial,
                             status=status, target_calls=None, cache_path=str(run/'caches'/stage/cid)))
-    orders = [[('eager', 1), ('compile', 1), ('compile', 4), ('eager', 4)],
-              [('compile', 1), ('eager', 1), ('eager', 4), ('compile', 4)],
-              [('eager', 4), ('compile', 4), ('compile', 1), ('eager', 1)]]   # same rotation as ViT
+    # Rotation generalised from ViT: t1 batches ascending, eager first; t2 ascending, compile first;
+    # t3 descending, eager first; mode order alternates between consecutive batches.
+    # With batches [1,4] this is exactly ViT's [[e1,c1,c4,e4],[c1,e1,e4,c4],[e4,c4,c1,e1]].
+    def order(trial):
+        bs = list(cfg['batches']) if trial % 3 != 0 else list(reversed(cfg['batches']))
+        first = ['eager', 'compile'] if trial % 3 != 2 else ['compile', 'eager']
+        return [(mode, b) for i, b in enumerate(bs) for mode in (first if i % 2 == 0 else first[::-1])]
     for trial in range(1, cfg['trials']+1):
-        for mode, b in orders[(trial-1) % 3]: add('performance', mode, b, trial)
-    for b in [1, 4]:
+        for mode, b in order(trial): add('performance', mode, b, trial)
+    for b in cfg['batches']:
         for mode in ['eager', 'compile']: add('outcmp', mode, b)
-    for b in [1, 4]:
+    for b in cfg['batches']:
         for mode in ['eager', 'compile']: add('cumulative', mode, b, status='not_planned')
     m = dict(run_id=run.name, created_utc=now(), command=[sys.executable, *sys.argv], status='ready', workers=workers,
              npu_budget_used_s=0, execution_order=[], resume_history=[], code_sha256={n: sha256(HERE/n) for n in SOURCES},
-             expected_performance_rows=4*cfg['trials']*(1+cfg['warmup']+cfg['repeats']))
+             expected_performance_rows=2*len(cfg['batches'])*cfg['trials']*(1+cfg['warmup']+cfg['repeats']))
     for n in SOURCES: shutil.copyfile(HERE/n, run/'code'/n)
     write_json(run/'manifest.json', m)
     tests = [sys.executable, '-m', 'unittest', 'discover', '-s', str(HERE/'tests'), '-p', 'test_math.py', '-v']

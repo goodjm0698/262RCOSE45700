@@ -49,13 +49,14 @@ def report(run, notes=None):
     be = read_json(run/'break_even_summary.json'); oc = read_json(run/'output_comparison.json')['pairs']
     cum = read_json(run/'cumulative_validation_summary.json')
     batches = {b['batch']: b for b in be['batches']}
+    bl = cfg.get('batches', [1, 4])
     devcfg = next((s for s in [read_json(p).get('effective', {}).get('device_configuration') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
     attn = next((s for s in [read_json(p).get('attn_implementation') for p in sorted((run/'cases').glob('*/result.json'))] if s), '—')
     t = f"# BERT-base NPU 측정 결과 (ViT 방식)\n\n실행 ID `{cfg['run_id']}`. 원본은 `BERT/vitstyle/runs/{cfg['run_id']}/`에 있음.\n\n"
     t += "## 실험 조건\n\n"
     t += (f"- 모델: `{cfg['model']}`, BF16, 길이 {cfg['seq_len']}, `cpu_fallback=False`, attention 구현 `{attn}`\n"
           f"- 마스크: `create_bidirectional_mask`를 passthrough로 패치하고 4D additive mask를 CPU에서 만들어 NPU로 넘김 (step4 방식)\n"
-          f"- 입력: step4의 실제 문장을 128로 패딩함. B1은 1번 문장, B4는 1~4번 문장\n"
+          f"- 입력: step4의 실제 문장을 128로 패딩함. batch B는 1~B번 문장 (batch {bl}), id는 int32\n"
           f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n"
           f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}회 실행하고 중앙값을 씀. 실행 순서는 ViT와 같이 회차마다 바꿈\n"
           f"- 캐시: 실행마다 `runs/<id>/caches/<stage>/<case>`를 새로 만들어 씀. 팀 공용 캐시는 사용하지 않음\n"
@@ -63,7 +64,7 @@ def report(run, notes=None):
           f"- A = runner 준비(S) + 첫 호출(F) + 워밍업 합(W). 모델 로드와 NPU 전송 시간은 제외함. T(N) = A + N × 반복 평균\n"
           f"- NPU 사용 시간 합계 {m['npu_budget_used_s']:.0f}초 (예산 {cfg['total_budget_s']}초)\n\n")
     t += "## 표 1. 시간 측정 (3회 중앙값, 괄호는 min~max)\n\n"
-    for b in [1, 4]:
+    for b in bl:
         x = batches[b]
         rows = [[mode, rng(x['first_call_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['warmup_sum_ms_by_mode'][mode]),
                  rng(x['A_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['mean_ms_by_mode'][mode], 3), rng(x['CV_by_mode'][mode], 4)]
@@ -71,10 +72,10 @@ def report(run, notes=None):
         t += f"**batch {b}**\n\n"+table(['모드', '첫 호출', '워밍업 합 (ms)', 'A', '반복 평균 ms', 'CV'], rows)
     t += "## 표 2. 배속 (eager 반복 평균 / compile 반복 평균, 같은 회차끼리 계산)\n\n"
     t += table(['batch', 't1', 't2', 't3', '중앙값'], [[b]+[f(batches[b]['per_trial_speedup'].get(str(i), batches[b]['per_trial_speedup'].get(i)), 3) for i in [1, 2, 3]]
-                                                    +[f(batches[b]['compile_speedup']['median'], 3)] for b in [1, 4]])
+                                                    +[f(batches[b]['compile_speedup']['median'], 3)] for b in bl])
     t += "## 표 3. 손익분기점\n\n"
     rows = []
-    for b in [1, 4]:
+    for b in bl:
         c = next(x for x in cum['batches'] if x['batch'] == b)
         keep = {True: '유지됨', False: '유지 안 됨'}.get(c.get('maintained_after_crossing'), '—')
         rows.append([b, rng(batches[b]['N_win'], 0), f(c['first_observed_compile_advantage_N']), f"{keep} (N={f(c['completed_common_calls'])}까지 관측)",
@@ -84,7 +85,7 @@ def report(run, notes=None):
     t += "## 표 4. 출력 비교 (eager vs compile, BF16 logits를 CPU FP32로 바꿔 비교)\n\n"
     rows = []
     for st_, label in [('outcmp', '16문장 (출력 비교 worker)'), ('performance', '성능 측정 출력 (마지막 반복, 3회 중 최악값)')]:
-        for b in [1, 4]:
+        for b in bl:
             ps = [p for p in oc if (p['stage'], p['batch']) == (st_, b) and p.get('structural_finite_ok')]
             if not ps: rows.append([label, b, '—', '—', '—', '—', '—']); continue
             n = ps[0]['compared_samples']
@@ -96,7 +97,7 @@ def report(run, notes=None):
     v = vit_tables()
     t += "## ViT와 비교 (같은 측정 방식, ViT 결과는 읽기만 함)\n\n"
     rows = []
-    for b in [1, 4]:
+    for b in [b for b in bl if b in v]:   # ViT measured only B1/B4
         x = batches[b]; c = next(y for y in cum['batches'] if y['batch'] == b); bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
         for name, d in [('BERT', None), ('ViT', v[b])]:
             if d is None:

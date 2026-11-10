@@ -189,7 +189,7 @@ def plan_cumulative(run):
     run = Path(run); cfg, m, be = [read_json(run/n) for n in ['config.json', 'manifest.json', 'break_even_summary.json']]
     plans = []; remaining = max(0, cfg['total_budget_s']-m['npu_budget_used_s'])
     oc = read_json(run/'output_comparison.json')['pairs']
-    for batch in [1, 4]:
+    for batch in cfg.get('batches', [1, 4]):
         ws = [find_case(m, 'cumulative', mode, batch) for mode in ['eager', 'compile']]
         if any(w.get('started_utc') for w in ws):
             plans.append(dict(batch=batch, status='existing_plan_preserved', target_calls=ws[0].get('target_calls'))); continue
@@ -237,6 +237,7 @@ def plan_cumulative(run):
 def analyze(run):
     run = Path(run); cfg, m = read_json(run/'config.json'), read_json(run/'manifest.json')
     timings = []; summary = []; comp = {}; be = []; prefix = []
+    batches = cfg.get('batches', [1, 4])   # runs made before the batch sweep have no 'batches' key
     for w in m['workers']:
         if w['stage'] != 'performance': continue
         r = result_for(run, w)
@@ -244,9 +245,9 @@ def analyze(run):
             timings.append(dict(**row, dtype='torch.bfloat16', cpu_fallback=False, input_hash=r.get('input_hash'), cache_policy=r.get('cache_state')))
         if w is find_case(m, 'performance', w['mode'], w['batch'], w['trial']) and r:
             s, c = worker_summary(run, w, cfg); summary.append(s); comp[w['case_id']] = c
-    outputs = [compare_pair(run, m, st_, b, t) for st_ in ['performance', 'outcmp', 'cumulative'] for b in [1, 4]
+    outputs = [compare_pair(run, m, st_, b, t) for st_ in ['performance', 'outcmp', 'cumulative'] for b in batches
                for t in (range(1, cfg['trials']+1) if st_ == 'performance' else [1])]
-    for b in [1, 4]:
+    for b in batches:
         for trial in range(1, cfg['trials']+1):
             ws = [find_case(m, 'performance', mode, b, trial) for mode in ['eager', 'compile']]
             cs = [comp.get(w['case_id'], dict(status='insufficient_data', reason='not run')) for w in ws]
@@ -270,7 +271,7 @@ def analyze(run):
                      output_validation_status='eligible_tolerance_pending' if pair['eligible'] else 'held')
             be.append(v)
     by_batch = []
-    for b in [1, 4]:
+    for b in batches:
         paired = [v for v in be if v['batch'] == b]
         good = [v for v in paired if v['N_win'] is not None and v['status'] in ['finite_break_even', 'already_beneficial', 'always_beneficial']]
         rep = sorted(good, key=lambda x: (x['N_win'], x['trial']))[len(good)//2] if good else None

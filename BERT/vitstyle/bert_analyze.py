@@ -32,6 +32,15 @@ def mean_range(values):
                 minimum=min(values) if values else None, maximum=max(values) if values else None, count=len(values))
 
 
+def pooled(per_trial):
+    """Team representative value: mean +- SD over all repeat calls of all trials pooled (3 x 50 = 150),
+    plus median and the per-trial means. per_trial = {trial: [repeat ms, ...]} (valid calls only)."""
+    vals = [v for t in sorted(per_trial) for v in per_trial[t]]
+    return dict(n=len(vals), trials_used=sorted(per_trial), mean_ms=st.mean(vals) if vals else None,
+                stdev_ms=st.stdev(vals) if len(vals) > 1 else None, median_ms=st.median(vals) if vals else None,
+                trial_means_ms={t: st.mean(v) for t, v in sorted(per_trial.items())})
+
+
 def warm_state(values):
     # Copied from /root/ViT/vit_pilot/analyze.py
     if len(values) < 10:
@@ -238,6 +247,7 @@ def analyze(run):
     run = Path(run); cfg, m = read_json(run/'config.json'), read_json(run/'manifest.json')
     timings = []; summary = []; comp = {}; be = []; prefix = []
     batches = cfg.get('batches', [1, 4])   # runs made before the batch sweep have no 'batches' key
+    repeat_vals = {(mode, b): {} for mode in ['eager', 'compile'] for b in batches}
     for w in m['workers']:
         if w['stage'] != 'performance': continue
         r = result_for(run, w)
@@ -245,6 +255,8 @@ def analyze(run):
             timings.append(dict(**row, dtype='torch.bfloat16', cpu_fallback=False, input_hash=r.get('input_hash'), cache_policy=r.get('cache_state')))
         if w is find_case(m, 'performance', w['mode'], w['batch'], w['trial']) and r:
             s, c = worker_summary(run, w, cfg); summary.append(s); comp[w['case_id']] = c
+            vals = [x['elapsed_ms'] for x in r.get('timings', []) if x['phase'] == 'repeat' and valid(x)]
+            if w['status'] == 'ok' and r.get('status') == 'ok' and vals: repeat_vals[(w['mode'], w['batch'])][w['trial']] = vals
     outputs = [compare_pair(run, m, st_, b, t) for st_ in ['performance', 'outcmp', 'cumulative'] for b in batches
                for t in (range(1, cfg['trials']+1) if st_ == 'performance' else [1])]
     for b in batches:
@@ -276,7 +288,10 @@ def analyze(run):
         good = [v for v in paired if v['N_win'] is not None and v['status'] in ['finite_break_even', 'already_beneficial', 'always_beneficial']]
         rep = sorted(good, key=lambda x: (x['N_win'], x['trial']))[len(good)//2] if good else None
         S = lambda mode, k: mean_range([s[k] for s in summary if s['batch'] == b and s['mode'] == mode and s['cost_status'] == 'valid'])
-        by_batch.append(dict(batch=b, statuses=[dict(trial=v['trial'], status=v['status'], N_win=v['N_win']) for v in paired],
+        pr = {mode: pooled(repeat_vals[(mode, b)]) for mode in ['eager', 'compile']}
+        by_batch.append(dict(batch=b, pooled_repeat_by_mode=pr,
+                             pooled_speedup=pr['eager']['mean_ms']/pr['compile']['mean_ms'] if pr['eager']['mean_ms'] and pr['compile']['mean_ms'] else None,
+                             statuses=[dict(trial=v['trial'], status=v['status'], N_win=v['N_win']) for v in paired],
                              valid_finite_paired_trials=len(good), requested_paired_trials=cfg['trials'],
                              N_win=mean_range([v['N_win'] for v in good]), representative_trial=rep['trial'] if rep else None,
                              compile_speedup=mean_range([v['compile_speedup'] for v in paired if v.get('compile_speedup')]),

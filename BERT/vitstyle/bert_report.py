@@ -25,6 +25,24 @@ def rng(v, d=2, scale=1.0):
     return f"{f(v['median']*scale, d)} ({f(v['minimum']*scale, d)}~{f(v['maximum']*scale, d)})"
 
 
+def tget(d, i):
+    return d.get(str(i), d.get(i)) if d else None     # JSON turns int trial keys into strings
+
+
+def msd(p, d=3):
+    return '—' if not p or p.get('mean_ms') is None else f"{f(p['mean_ms'], d)} ± {f(p.get('stdev_ms'), d)}"
+
+
+def vit_pooled(b, mode):
+    # ViT raw repeat calls, all trials pooled (same definition as bert_analyze.pooled); read only
+    per = {}
+    for r in csv.DictReader(open(VIT_RUN/'timings.csv')):
+        if (r['stage'], r['phase'], r['mode'], int(r['batch'])) == ('performance', 'repeat', mode, b) and r['status'] == 'ok' and r['timing_valid'] == 'True':
+            per.setdefault(int(r['trial']), []).append(float(r['elapsed_ms']))
+    vals = [v for t in sorted(per) for v in per[t]]
+    return dict(n=len(vals), mean_ms=st.mean(vals) if vals else None, stdev_ms=st.stdev(vals) if len(vals) > 1 else None)
+
+
 def vit_tables():
     rows = list(csv.DictReader(open(VIT_RUN/'trial_summary.csv')))
     be = read_json(VIT_RUN/'break_even_summary.json'); cum = read_json(VIT_RUN/'cumulative_validation_summary.json')
@@ -37,6 +55,8 @@ def vit_tables():
             d[mode] = {k: st.median(float(r[k]) for r in rs) for k in ['first_call_ms', 'A_ms', 'mean_ms']}
         tr = [t for t in be['trials'] if t['batch'] == b]
         d['speedup'] = st.median(t['compile_speedup'] for t in tr)
+        d['pooled'] = {mode: vit_pooled(b, mode) for mode in ['eager', 'compile']}
+        d['pooled_speedup'] = d['pooled']['eager']['mean_ms']/d['pooled']['compile']['mean_ms']
         d['N_win'] = next(x for x in be['batches'] if x['batch'] == b)['N_win']
         d['cum'] = next(x for x in cum['batches'] if x['batch'] == b)
         d['out'] = next(p for p in oc if (p['stage'], p['batch'], p['trial']) == ('performance', b, 1))
@@ -58,7 +78,9 @@ def report(run, notes=None):
           f"- 마스크: `create_bidirectional_mask`를 passthrough로 패치하고 4D additive mask를 CPU에서 만들어 NPU로 넘김 (step4 방식)\n"
           f"- 입력: step4의 실제 문장을 128로 패딩함. batch B는 1~B번 문장 (batch {bl}), id는 int32\n"
           f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n"
-          f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}회 실행하고 중앙값을 씀. 실행 순서는 ViT와 같이 회차마다 바꿈\n"
+          f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}세트 실행함. 실행 순서는 회차마다 바꿈\n"
+          f"- 대표값: 반복 {cfg['trials']*cfg['repeats']}회(세트 {cfg['trials']}개 × {cfg['repeats']}회)를 모두 모은 평균 ± 표준편차. 중앙값과 세트별 평균도 같이 적음. 정상 종료한 세트만 포함함\n"
+          f"- 첫 호출은 성능 비교에서 빼고 기록만 함. 첫 호출·워밍업 합·A는 세트 3개의 중앙값 (min~max)\n"
           f"- 캐시: 실행마다 `runs/<id>/caches/<stage>/<case>`를 새로 만들어 씀. 팀 공용 캐시는 사용하지 않음\n"
           f"- 타이머: `stream.synchronize()` → `perf_counter_ns` → `runner(**inputs)` → `stream.synchronize()`. 입력 전송과 출력 CPU 복사는 타이머 밖임\n"
           f"- A = runner 준비(S) + 첫 호출(F) + 워밍업 합(W). 모델 로드와 NPU 전송 시간은 제외함. T(N) = A + N × 반복 평균\n"
@@ -67,16 +89,23 @@ def report(run, notes=None):
     if bad:
         t += "## 정상 종료하지 않은 성능 측정 worker\n\n"+table(['case', '상태', '사유'], [
             [w['case_id'], w['status'], (w.get('reason') or '')+(f" ({w['skipped_because']})" if w.get('skipped_because') else '')] for w in bad])
-    t += "## 표 1. 시간 측정 (3회 중앙값, 괄호는 min~max)\n\n"
+    trials = list(range(1, cfg['trials']+1))
+    t += f"## 표 1. 반복 시간 (ms, 대표값은 {cfg['trials']*cfg['repeats']}회 전체 평균 ± 표준편차)\n\n"
+    rows = []
     for b in bl:
-        x = batches[b]
-        rows = [[mode, rng(x['first_call_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['warmup_sum_ms_by_mode'][mode]),
-                 rng(x['A_ms_by_mode'][mode], 2, 1e-3)+' s', rng(x['mean_ms_by_mode'][mode], 3), rng(x['CV_by_mode'][mode], 4)]
-                for mode in ['eager', 'compile']]
-        t += f"**batch {b}**\n\n"+table(['모드', '첫 호출', '워밍업 합 (ms)', 'A', '반복 평균 ms', 'CV'], rows)
-    t += "## 표 2. 배속 (eager 반복 평균 / compile 반복 평균, 같은 회차끼리 계산)\n\n"
-    t += table(['batch', 't1', 't2', 't3', '중앙값'], [[b]+[f(batches[b]['per_trial_speedup'].get(str(i), batches[b]['per_trial_speedup'].get(i)), 3) for i in [1, 2, 3]]
-                                                    +[f(batches[b]['compile_speedup']['median'], 3)] for b in bl])
+        for mode in ['eager', 'compile']:
+            p = batches[b].get('pooled_repeat_by_mode', {}).get(mode)
+            rows.append([b, mode, msd(p), f(p and p['median_ms'], 3), f(p and p['n'])]
+                        +[f(tget(p and p['trial_means_ms'], i), 3) for i in trials])
+    t += table(['batch', '모드', '평균 ± 표준편차', '중앙값', 'n']+[f'세트{i} 평균' for i in trials], rows)
+    t += "## 표 1-2. 첫 호출·워밍업·A (기록용, 세트 3개의 중앙값, 괄호는 min~max)\n\n"
+    rows = [[b, mode, rng(batches[b]['first_call_ms_by_mode'][mode], 2, 1e-3)+' s', rng(batches[b]['warmup_sum_ms_by_mode'][mode]),
+             rng(batches[b]['A_ms_by_mode'][mode], 2, 1e-3)+' s'] for b in bl for mode in ['eager', 'compile']]
+    t += table(['batch', '모드', '첫 호출', f"워밍업 {cfg['warmup']}회 합 (ms)", 'A'], rows)
+    t += "## 표 2. 배속 (eager 반복 평균 / compile 반복 평균)\n\n"
+    t += table(['batch', '대표 (전체 평균끼리)']+[f'세트{i}' for i in trials],
+               [[b, f(batches[b].get('pooled_speedup'), 3)]+[f(tget(batches[b]['per_trial_speedup'], i), 3) for i in trials] for b in bl])
+    t += "대표 배속은 전체 평균끼리 나눈 값임. 세트별 값은 같은 세트의 eager와 compile 평균끼리 나눈 값임.\n\n"
     t += "## 표 3. 손익분기점\n\n"
     rows = []
     for b in bl:
@@ -106,14 +135,14 @@ def report(run, notes=None):
         for name, d in [('BERT', None), ('ViT', v[b])]:
             if d is None:
                 rows.append([b, name, f(x['first_call_ms_by_mode']['eager']['median']/1e3, 1)+' / '+f(x['first_call_ms_by_mode']['compile']['median']/1e3, 1),
-                             f(x['mean_ms_by_mode']['eager']['median'], 3)+' / '+f(x['mean_ms_by_mode']['compile']['median'], 3),
-                             f(x['compile_speedup']['median'], 2), f(x['N_win']['median'], 0), f(c['first_observed_compile_advantage_N']),
+                             msd(x['pooled_repeat_by_mode']['eager'])+' / '+msd(x['pooled_repeat_by_mode']['compile']),
+                             f(x.get('pooled_speedup'), 2), f(x['N_win']['median'], 0), f(c['first_observed_compile_advantage_N']),
                              f(bo.get('cosine_min'), 6)])
             else:
                 rows.append([b, name, f(d['eager']['first_call_ms']/1e3, 1)+' / '+f(d['compile']['first_call_ms']/1e3, 1),
-                             f(d['eager']['mean_ms'], 3)+' / '+f(d['compile']['mean_ms'], 3), f(d['speedup'], 2), f(d['N_win']['median'], 0),
+                             msd(d['pooled']['eager'])+' / '+msd(d['pooled']['compile']), f(d['pooled_speedup'], 2), f(d['N_win']['median'], 0),
                              f(d['cum']['first_observed_compile_advantage_N']), f(d['out'].get('cosine_min'), 6)])
-    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 E / C (ms)', '배속', '예측 N_win', '실측 교차 N', 'cosine 최소'], rows)
+    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 ± SD E / C (ms)', '배속 (전체 평균끼리)', '예측 N_win', '실측 교차 N', 'cosine 최소'], rows)
     t += f"ViT 원본: `{VIT_RUN}` (torchvision vit_b_16, 입력 224×224, MHA fastpath는 꺼짐). 두 모델의 연산량이 달라서 절대 시간을 같은 기준으로 비교할 수는 없음.\n\n"
     if notes and Path(notes).exists(): t += Path(notes).read_text()
     out = run.parents[2]/'RESULTS.md'    # BERT/RESULTS.md

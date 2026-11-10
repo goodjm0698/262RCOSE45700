@@ -50,13 +50,18 @@ def child(mode, run_dir):
         rec['cache_dir'] = str(cache)
         sents = SENTENCES[:BATCH]
 
-        # 1) CPU FP32 reference, original mask path (before load_model() patches it)
+        # 1) CPU FP32 reference with the ORIGINAL mask path and 2D tokenizer mask.
+        #    Must finish BEFORE load_model(): it replaces create_bidirectional_mask with a
+        #    passthrough, which would hand the raw 2D int64 mask to SDPA (step4_compare.py
+        #    likewise runs its CPU reference at lines 44-48 before patching at line 58).
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(MODEL)
         ref_model = AutoModelForSequenceClassification.from_pretrained(MODEL).eval()
-        tok, model = load_model()            # patches create_bidirectional_mask; BF16 eval
         x2d = tok(sents, padding='max_length', max_length=SEQ_LEN, truncation=True, return_tensors='pt')
         with torch.inference_mode():
             ref = ref_model(**x2d).logits.float()
         del ref_model
+        tok, model = load_model()            # now patch create_bidirectional_mask; BF16 eval
 
         # 2) NPU run, same settings as bert_worker.py
         x = encode(tok, sents)

@@ -1,14 +1,9 @@
-"""Build BERT/RESULTS.md from a finished run. ViT results are read only.
+"""Build BERT/RESULTS.md from a finished run.
 Usage: python bert_report.py --run-dir runs/ID [--notes notes.md]
 """
 import argparse
-import csv
-import statistics as st
 from pathlib import Path
 from common import read_json
-
-VIT_RUN = Path('/root/ViT/vit_pilot/fastpath_compare_runs/20261104T172746Z-e1b86b')   # read only
-
 
 def f(x, d=2):
     if x is None: return '—'
@@ -31,37 +26,6 @@ def tget(d, i):
 
 def msd(p, d=3):
     return '—' if not p or p.get('mean_ms') is None else f"{f(p['mean_ms'], d)} ± {f(p.get('stdev_ms'), d)}"
-
-
-def vit_pooled(b, mode):
-    # ViT raw repeat calls, all trials pooled (same definition as bert_analyze.pooled); read only
-    per = {}
-    for r in csv.DictReader(open(VIT_RUN/'timings.csv')):
-        if (r['stage'], r['phase'], r['mode'], int(r['batch'])) == ('performance', 'repeat', mode, b) and r['status'] == 'ok' and r['timing_valid'] == 'True':
-            per.setdefault(int(r['trial']), []).append(float(r['elapsed_ms']))
-    vals = [v for t in sorted(per) for v in per[t]]
-    return dict(n=len(vals), mean_ms=st.mean(vals) if vals else None, stdev_ms=st.stdev(vals) if len(vals) > 1 else None)
-
-
-def vit_tables():
-    rows = list(csv.DictReader(open(VIT_RUN/'trial_summary.csv')))
-    be = read_json(VIT_RUN/'break_even_summary.json'); cum = read_json(VIT_RUN/'cumulative_validation_summary.json')
-    oc = read_json(VIT_RUN/'output_comparison.json')['pairs']
-    out = {}
-    for b in [1, 4]:
-        d = {}
-        for mode in ['eager', 'compile']:
-            rs = [r for r in rows if int(r['batch']) == b and r['mode'] == mode]
-            d[mode] = {k: st.median(float(r[k]) for r in rs) for k in ['first_call_ms', 'A_ms', 'mean_ms']}
-        tr = [t for t in be['trials'] if t['batch'] == b]
-        d['speedup'] = st.median(t['compile_speedup'] for t in tr)
-        d['pooled'] = {mode: vit_pooled(b, mode) for mode in ['eager', 'compile']}
-        d['pooled_speedup'] = d['pooled']['eager']['mean_ms']/d['pooled']['compile']['mean_ms']
-        d['N_win'] = next(x for x in be['batches'] if x['batch'] == b)['N_win']
-        d['cum'] = next(x for x in cum['batches'] if x['batch'] == b)
-        d['out'] = next(p for p in oc if (p['stage'], p['batch'], p['trial']) == ('performance', b, 1))
-        out[b] = d
-    return out
 
 
 def report(run, notes=None):
@@ -131,25 +95,6 @@ def report(run, notes=None):
                          f"{min(p['top1_matches'] for p in ps)}/{n}"])
     t += table(['입력', 'batch', '최대 절대오차', '평균 절대오차', 'cosine 평균', 'cosine 최소', 'Top-1 일치'], rows)
     t += "허용 오차 기준은 아직 정하지 않았으므로 합격 판정은 하지 않음(pending). BERT logits는 2차원이라 cosine이 높게 나오기 쉬움.\n\n"
-    v = vit_tables()
-    vit_warmup = read_json(VIT_RUN/'config.json').get('warmup', '?')
-    t += f"## ViT와 반복 시간 비교 (워밍업: BERT {cfg['warmup']}회, ViT {vit_warmup}회, ViT 결과는 읽기만 함)\n\n"
-    rows = []
-    for b in [b for b in bl if b in v]:   # ViT measured only B1/B4
-        x = batches[b]; bo = next(p for p in oc if (p['stage'], p['batch']) == ('outcmp', b))
-        for name, d in [('BERT', None), ('ViT', v[b])]:
-            # A and N_win (predicted/observed crossing) depend on the warmup count, so they are not in this table
-            if d is None:
-                rows.append([b, name, f(x['first_call_ms_by_mode']['eager']['median']/1e3, 1)+' / '+f(x['first_call_ms_by_mode']['compile']['median']/1e3, 1),
-                             msd(x['pooled_repeat_by_mode']['eager'])+' / '+msd(x['pooled_repeat_by_mode']['compile']),
-                             f(x.get('pooled_speedup'), 2), f(bo.get('cosine_min'), 6)])
-            else:
-                rows.append([b, name, f(d['eager']['first_call_ms']/1e3, 1)+' / '+f(d['compile']['first_call_ms']/1e3, 1),
-                             msd(d['pooled']['eager'])+' / '+msd(d['pooled']['compile']), f(d['pooled_speedup'], 2),
-                             f(d['out'].get('cosine_min'), 6)])
-    t += table(['batch', '모델', '첫 호출 E / C (s)', '반복 평균 ± SD E / C (ms)', '배속 (전체 평균끼리)', 'cosine 최소'], rows)
-    t += "A와 N_win은 워밍업 횟수가 달라 직접 비교하지 않음.\n\n"
-    t += f"ViT 원본: `{VIT_RUN}` (torchvision vit_b_16, 입력 224×224, MHA fastpath는 꺼짐). 두 모델의 연산량이 달라서 절대 시간을 같은 기준으로 비교할 수는 없음.\n\n"
     if notes and Path(notes).exists(): t += Path(notes).read_text()
     out = run.parents[2]/'RESULTS.md'    # BERT/RESULTS.md
     out.write_text(t)

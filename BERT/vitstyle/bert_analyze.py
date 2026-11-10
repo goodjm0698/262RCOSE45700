@@ -270,8 +270,8 @@ def analyze(run):
                     v.update({f'S_{mode}_ms': float(q['S']), f'F_{mode}_ms': float(q['F']), f'W_{mode}_ms': float(q['W'])})
                 v['compile_speedup'] = float(e['t']/c['t'])
                 ss = [next(s for s in summary if s['case_id'] == w['case_id']) for w in ws]
-                pooled = math.sqrt(sum(s['stdev_ms']**2 for s in ss)); v['combined_repeat_SD_ms'] = pooled
-                v['variation_assessment'] = 'uncertain' if abs(v['delta_t_ms']) <= pooled else 'mean_gap_exceeds_descriptive_combined_SD'
+                combined_sd = math.sqrt(sum(s['stdev_ms']**2 for s in ss)); v['combined_repeat_SD_ms'] = combined_sd
+                v['variation_assessment'] = 'uncertain' if abs(v['delta_t_ms']) <= combined_sd else 'mean_gap_exceeds_descriptive_combined_SD'
                 v['warm_state_assessments'] = {s['mode']: s['warm_state_assessment'] for s in ss}
                 for k in range(1, 2+cfg['warmup']):
                     prefix.append(dict(batch=b, trial=trial, K=k, G_eager_ms=float(G(e, k)), G_compile_ms=float(G(c, k)), difference_ms=float(G(c, k)-G(e, k))))

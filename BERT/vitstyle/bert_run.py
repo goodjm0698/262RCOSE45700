@@ -56,7 +56,7 @@ def fresh(a):
     for name in ['logs', 'cases', 'outputs', 'code']: (run/name).mkdir()
     from bert_math import NUMERIC_RULE
     cfg = dict(run_id=run.name, model='textattack/bert-base-uncased-SST-2', seq_len=128, device=a.device,
-               dtype='torch.bfloat16', cpu_fallback=False, mask='create_bidirectional_mask passthrough + CPU 4D additive BF16 mask (step4_compare.py)',
+               dtype='torch.bfloat16', id_dtype='torch.int32', cpu_fallback=False, mask='create_bidirectional_mask passthrough + CPU 4D additive BF16 mask (step4_compare.py)',
                pe='SDK default (not set); recorded per worker as effective.device_configuration',
                cache_policy='fresh_process_private_sdk_cache_initially_absent_system_cold_unverified',
                timer='current_stream.synchronize(); perf_counter_ns; runner(**inputs); current_stream.synchronize()',

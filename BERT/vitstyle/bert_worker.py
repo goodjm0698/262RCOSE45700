@@ -38,7 +38,7 @@ def main():
         import torch
         import furiosa.torch as ft
         import transformers
-        from bert_model import load_model, encode, inputs_hash, SENTENCES, SEQ_LEN
+        from bert_model import load_model, encode, inputs_hash, SENTENCES, SEQ_LEN, ID_DTYPE
         dev = torch.device(cfg['device'])
         if not ft.is_available() or cfg['device'] not in ft.get_available_devices(): raise RuntimeError('Allowed device unavailable')
         if torch._dynamo.config.suppress_errors or ft.backend.eager_fallback: raise RuntimeError('Error suppression/backend eager fallback must be disabled')
@@ -58,6 +58,8 @@ def main():
             if any(p.dtype != torch.bfloat16 for p in model.parameters()): raise RuntimeError('All parameters must be BF16')
             sents = SENTENCES if stage == 'outcmp' else SENTENCES[:B]
             chunks_cpu = [encode(tok, sents[i:i+B]) for i in range(0, len(sents), B)]
+            if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in ['input_ids', 'token_type_ids']):
+                raise RuntimeError('input_ids/token_type_ids must be '+cfg['id_dtype'])
             r['input_hash'] = inputs_hash(chunks_cpu[0]) if stage != 'outcmp' else None
             r['input_hashes'] = [inputs_hash(c) for c in chunks_cpu]
             r['valid_tokens'] = [c['valid_tokens'] for c in chunks_cpu]

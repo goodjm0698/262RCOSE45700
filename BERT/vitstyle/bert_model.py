@@ -46,11 +46,19 @@ def additive_mask(mask2d, dtype):
     return m.expand(-1, 1, SEQ_LEN, -1).contiguous().to(dtype)         # [B,1,L,L]
 
 
+ID_DTYPE = 'torch.int32'
+
+
 def encode(tok, sentences):
-    """CPU tensors: real sentences padded to 128, BF16 additive 4D mask."""
+    """CPU tensors: real sentences padded to 128, BF16 additive 4D mask.
+
+    input_ids/token_type_ids are int32 for every batch. With int64 and batch>1 the embedding
+    aten.index.Tensor fails NPU compilation in both eager and compile; int32 succeeds
+    (runs/b4_probe_20261110_075109/results.jsonl, cases 2/3, 6/7, 8/9).
+    """
     import torch
     x = tok(sentences, padding='max_length', max_length=SEQ_LEN, truncation=True, return_tensors='pt')
-    return dict(input_ids=x['input_ids'], token_type_ids=x['token_type_ids'],
+    return dict(input_ids=x['input_ids'].to(torch.int32), token_type_ids=x['token_type_ids'].to(torch.int32),
                 attention_mask=additive_mask(x['attention_mask'], torch.bfloat16),
                 valid_tokens=[int(v) for v in x['attention_mask'].sum(1)])
 

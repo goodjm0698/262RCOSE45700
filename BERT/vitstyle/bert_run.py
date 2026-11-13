@@ -2,7 +2,7 @@
 
 Stages (each worker = new process + new private cache):
   performance : 3 trials x {eager,compile} x BATCHES, rotated order (reduces to ViT's for B1/B4)
-  outcmp      : 16 step4 sentences, {eager,compile} x BATCHES (replaces ViT diagnostic gate)
+  outcmp      : 16 step4 sentences (B > 16: reused cyclically to B), {eager,compile} x BATCHES (replaces ViT diagnostic gate)
 A failed/timed-out worker is recorded and the next worker starts; only a busy NPU stops the run.
 After one failure/timeout, that (mode, batch) is not launched in later trials: status 'skipped',
 reason '이전 세트 실패로 건너뜀', skipped_because=<failed case_id>.

@@ -49,6 +49,18 @@ def additive_mask(mask2d, dtype):
 ID_DTYPE = 'torch.int32'
 
 
+def sentence_indices(stage, batch):
+    """Indices into SENTENCES for one worker.
+
+    performance/cumulative: sentences 1..B. outcmp: all 16, cut into chunks of B.
+    Only 16 real sentences exist, so when more are needed (B > 16, or B not dividing 16 in outcmp)
+    they are reused cyclically (i % 16) and the count is rounded up to a multiple of B.
+    For B in 1, 2, 4, 8, 16 this gives exactly the previous inputs.
+    """
+    n = batch if stage != 'outcmp' else -(-max(len(SENTENCES), batch)//batch)*batch
+    return [i % len(SENTENCES) for i in range(n)]
+
+
 def encode(tok, sentences):
     """CPU tensors: real sentences padded to 128, BF16 additive 4D mask.
 

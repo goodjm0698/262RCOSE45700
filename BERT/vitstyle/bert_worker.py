@@ -6,7 +6,7 @@ first/warmup/repeat|work schedule, outputs saved for first/last warmup/last repe
 every cumulative work output checked on CPU outside the timer.
 Changed for BERT: HF model + CPU 4D mask (step4_compare.py), logits [B,2], no MHA fastpath
 control (HF BERT does not use nn.MultiheadAttention), no diagnostic stage, new 'outcmp' stage
-that runs the 16 step4 sentences in chunks of B.
+that runs the 16 step4 sentences in chunks of B (B > 16: sentences reused cyclically, bert_model.sentence_indices).
 """
 import argparse
 from pathlib import Path
@@ -38,7 +38,7 @@ def main():
         import torch
         import furiosa.torch as ft
         import transformers
-        from bert_model import load_model, encode, inputs_hash, SENTENCES, SEQ_LEN, ID_DTYPE
+        from bert_model import load_model, encode, inputs_hash, sentence_indices, SENTENCES, SEQ_LEN, ID_DTYPE
         dev = torch.device(cfg['device'])
         if not ft.is_available() or cfg['device'] not in ft.get_available_devices(): raise RuntimeError('Allowed device unavailable')
         if torch._dynamo.config.suppress_errors or ft.backend.eager_fallback: raise RuntimeError('Error suppression/backend eager fallback must be disabled')
@@ -56,14 +56,14 @@ def main():
             tok, model = load_model()
             r['attn_implementation'] = model.config._attn_implementation
             if any(p.dtype != torch.bfloat16 for p in model.parameters()): raise RuntimeError('All parameters must be BF16')
-            sents = SENTENCES if stage == 'outcmp' else SENTENCES[:B]
+            idx = sentence_indices(stage, B); sents = [SENTENCES[i] for i in idx]   # B > 16 reuses sentences cyclically
             chunks_cpu = [encode(tok, sents[i:i+B]) for i in range(0, len(sents), B)]
             if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in ['input_ids', 'token_type_ids']):
                 raise RuntimeError('input_ids/token_type_ids must be '+cfg['id_dtype'])
             r['input_hash'] = inputs_hash(chunks_cpu[0]) if stage != 'outcmp' else None
             r['input_hashes'] = [inputs_hash(c) for c in chunks_cpu]
             r['valid_tokens'] = [c['valid_tokens'] for c in chunks_cpu]
-            r['sentence_indices'] = list(range(len(sents)))
+            r['sentence_indices'] = idx
             model = model.to(dev)
             chunks = [{k: c[k].to(dev) for k in ['input_ids', 'token_type_ids', 'attention_mask']} for c in chunks_cpu]
             stream = ft.current_stream(cfg['device']); stream.synchronize()
@@ -128,7 +128,7 @@ def main():
             ev.emit('phase_end', phase=prev, wall_ms=(time.perf_counter_ns()-phase_started)/1e6, measured_sum_ms=sum(phase_times))
             if stage == 'outcmp':
                 allout = torch.cat(outcmp_parts)
-                target = a.run/'outputs'/f'{a.case}_all16.pt'; torch.save(allout, target)
+                target = a.run/'outputs'/f'{a.case}_all16.pt'; torch.save(allout, target)   # key name kept; holds all outcmp rows (16, or B if B > 16)
                 r['outputs']['all16'] = str(target); r['output_file'] = str(target)
             r.update(active_call=None, output_valid=True, cumulative_work_outputs_checked=n if stage == 'cumulative' else None)
             r['status'] = 'ok'

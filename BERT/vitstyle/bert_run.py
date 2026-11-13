@@ -8,7 +8,8 @@ After one failure/timeout, that (mode, batch) is not launched in later trials: s
 reason '이전 세트 실패로 건너뜀', skipped_because=<failed case_id>.
   cumulative  : break-even validation, target = ceil(1.2*median N_win)
 Usage:
-  python bert_run.py run                                  # new run dir, performance stage
+  python bert_run.py run                                  # new run dir, performance stage (B1..B16, 3 trials)
+  python bert_run.py run --batches 32,64 --trials 1       # same settings, other batches / trial count
   python bert_run.py resume --run-dir runs/ID --stage outcmp|cumulative
   python bert_run.py analyze --run-dir runs/ID
 If another process is on the NPU the worker is held and the orchestrator stops (exit 3).
@@ -30,7 +31,7 @@ WORKER_SOURCES = ['bert_worker.py', 'bert_model.py', 'common.py']  # must not ch
 STAGES = ['performance', 'outcmp', 'cumulative']
 FAILED = ['error', 'timeout']   # a (mode, batch) with one of these is skipped in later trials
 SKIP_REASON = '이전 세트 실패로 건너뜀'
-BATCHES = [1, 2, 4, 8, 16]   # length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
+BATCHES = [1, 2, 4, 8, 16]   # default for `run`; length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
 
 
 class NPUBusy(Exception):
@@ -69,7 +70,7 @@ def fresh(a):
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
                cumulative_target_rule='ceil(1.2 * median paired N_win); N_win=1 -> at least 20; cap/budget may shorten',
                cumulative_wall_bound_rule='1.5*max(new-trial prepare+A+N*t)/1000 +60 s +N*0.001 s per mode',
-               batches=BATCHES, worker_timeout_s=1800, total_budget_s=14400, warmup=10, repeats=50, trials=3, max_cumulative_calls=10000,
+               batches=a.batches, worker_timeout_s=1800, total_budget_s=14400, warmup=10, repeats=50, trials=a.trials, max_cumulative_calls=10000,
                hf_hub_offline=True)
     write_json(run/'config.json', cfg)
     workers = []
@@ -183,7 +184,13 @@ def main():
     p.add_argument('action', choices=['run', 'resume', 'analyze'])
     p.add_argument('--run-dir', type=Path); p.add_argument('--stage', choices=STAGES, default='performance')
     p.add_argument('--device', default='furiosa:0')
+    p.add_argument('--batches', type=lambda s: sorted({int(b) for b in s.split(',')}), default=BATCHES,
+                   help='run only: comma-separated batch sizes (default 1,2,4,8,16)')
+    p.add_argument('--trials', type=int, default=3, help='run only: independent sets per (mode, batch) (default 3)')
     a = p.parse_args()
+    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3):
+        p.error('--batches/--trials apply only to `run`; resume/analyze use the run\'s config.json')
+    if a.trials < 1 or min(a.batches) < 1: p.error('--trials and batch sizes must be >= 1')
     run = fresh(a) if a.action == 'run' else a.run_dir.resolve()
     print('BERT_RUN '+str(run), flush=True)
     if a.action == 'analyze':

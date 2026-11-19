@@ -1,0 +1,7 @@
+torch 2.10.0+cpu
+Loading weights:   0%|          | 0/201 [00:00<?, ?it/s]Loading weights: 100%|██████████| 201/201 [00:00<00:00, 30379.27it/s]
+model & input ready on furiosa:0
+[eager] first call : 39308.2 ms
+[eager] steady avg  : 22.06 ms (min 21.85 / max 22.49, n=20)
+[compile] first call : 140785.0 ms
+[compile] steady avg  : 2.10 ms (min 2.09 / max 2.12, n=20)

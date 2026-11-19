@@ -48,7 +48,46 @@ def trend_table(cfg, batches, base):
     return t
 
 
-def report(run, notes=None, baseline=None, out=None):
+def run_fusion(cfg):
+    """Fusion value a run measured with. Runs made before --fusion existed have no key: SDK default = 1 PE
+    (their workers recorded Fusion(num_fusion=1, ...) in effective.device_configuration)."""
+    return cfg.get('fusion') or 1
+
+
+def compile_stats(run):
+    """{batch: pooled compile repeat stats} of one finished run; files are only read."""
+    be = read_json(Path(run)/'break_even_summary.json')
+    return {b['batch']: b['pooled_repeat_by_mode'].get('compile') for b in be['batches']
+            if b.get('pooled_repeat_by_mode', {}).get('compile', {}).get('mean_ms') is not None}
+
+
+def fusion_table(run, cfg, batches, others):
+    """Compile repeat time per batch for every fusion value found in this run plus `others`.
+    Same (fusion, batch) in several runs: this run wins, otherwise the run listed last."""
+    cells = {}; sources = {}
+    runs = [Path(o) for o in others] + [Path(run)]
+    for r in runs:
+        rc = read_json(r/'config.json'); fu = run_fusion(rc)
+        for b, p in compile_stats(r).items():
+            cells[(fu, b)] = p; sources[(fu, b)] = rc['run_id']
+    fusions = sorted({fu for fu, _ in cells}); rows = []
+    for b in sorted(batches):
+        base = cells.get((1, b)); row = [b]
+        for fu in fusions:
+            p = cells.get((fu, b)); row.append(msd(p))
+            if fu != 1: row.append('—' if not p or not base else f(base['mean_ms']/p['mean_ms'], 3))
+        rows.append(row)
+    headers = ['batch']+[h for fu in fusions for h in ([f'fusion {fu} compile 평균 ± SD (ms)']+([f'배속 (fusion 1 / fusion {fu})'] if fu != 1 else []))]
+    t = "## 표 6. PE fusion 비교 (compile 반복 시간)\n\n"+table(headers, rows)
+    t += "fusion n = `furiosa.torch.set_fusion(n)`으로 PE n개를 `furiosa:0` 하나로 묶은 것. fusion 1은 SDK 기본값(PE 1개)임. "
+    t += "배속은 같은 batch의 fusion 1 평균을 해당 fusion 평균으로 나눈 값. 평균 ± SD의 n은 run마다 다를 수 있음(세트 수 × 반복 수). "
+    used = {}
+    for (fu, b), rid in sorted(sources.items()): used.setdefault(rid, []).append(f'fusion {fu} batch {b}')
+    t += "출처 run: "+'; '.join(f"`{rid}` ({', '.join(v)})" for rid, v in used.items())+". 다른 run은 읽기만 함.\n\n"
+    return t
+
+
+def report(run, notes=None, baseline=None, out=None, fusion_runs=()):
     run = Path(run); cfg = read_json(run/'config.json'); m = read_json(run/'manifest.json')
     be = read_json(run/'break_even_summary.json'); oc = read_json(run/'output_comparison.json')['pairs']
     cp = run/'cumulative_validation_summary.json'
@@ -64,8 +103,10 @@ def report(run, notes=None, baseline=None, out=None):
     t += (f"- 모델: `{cfg['model']}`, BF16, 길이 {cfg['seq_len']}, `cpu_fallback=False`, attention 구현 `{attn}`\n"
           f"- 마스크: `create_bidirectional_mask`를 passthrough로 패치하고 4D additive mask를 CPU에서 만들어 NPU로 넘김 (step4 방식)\n"
           f"- 입력: step4의 실제 문장을 128로 패딩함. batch B는 1~B번 문장, 16개를 넘으면 16문장을 순서대로 반복해 채움 (batch {bl}), id는 int32\n"
-          f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n"
-          f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}세트 실행함. 실행 순서는 회차마다 바꿈\n"
+          + (f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n" if cfg.get('fusion') is None else
+             f"- PE: worker마다 장치 사용 전에 `furiosa.torch.set_fusion({cfg['fusion']})`을 한 번 호출하고 `furiosa:0` 사용. 실제 적용값은 `{devcfg.split(', Single')[0]})`\n")
+          + (f"- 측정 모드: {cfg['modes']}만 측정함. 다른 모드의 칸은 비어 있음\n" if cfg.get('modes') not in (None, ['eager', 'compile']) else '')
+          + f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}세트 실행함. 실행 순서는 회차마다 바꿈\n"
           f"- 대표값: 반복 {cfg['trials']*cfg['repeats']}회(세트 {cfg['trials']}개 × {cfg['repeats']}회)를 모두 모은 평균 ± 표준편차. 중앙값과 세트별 평균도 같이 적음. 정상 종료한 세트만 포함함\n"
           f"- 첫 호출은 성능 비교에서 빼고 기록만 함. 첫 호출·워밍업 합·A는 세트 {cfg['trials']}개의 중앙값 (min~max)\n"
           f"- 캐시: 실행마다 `runs/<id>/caches/<stage>/<case>`를 새로 만들어 씀. 팀 공용 캐시는 사용하지 않음\n"
@@ -116,6 +157,7 @@ def report(run, notes=None, baseline=None, out=None):
     t += table(['입력', 'batch', '최대 절대오차', '평균 절대오차', 'cosine 평균', 'cosine 최소', 'Top-1 일치'], rows)
     t += "허용 오차 기준은 아직 정하지 않았으므로 합격 판정은 하지 않음(pending). BERT logits는 2차원이라 cosine이 높게 나오기 쉬움.\n\n"
     if baseline: t += trend_table(cfg, batches, Path(baseline))
+    if fusion_runs or cfg.get('fusion') is not None: t += fusion_table(run, cfg, bl, fusion_runs)
     if notes and Path(notes).exists(): t += Path(notes).read_text()
     out = Path(out) if out else run.parents[2]/'RESULTS.md'    # default BERT/RESULTS.md
     out.write_text(t)
@@ -126,4 +168,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(); p.add_argument('--run-dir', type=Path, required=True); p.add_argument('--notes', type=Path)
     p.add_argument('--baseline-run', type=Path, help='finished run whose other batches are added to a trend table (read only)')
     p.add_argument('--out', type=Path, help='output markdown (default BERT/RESULTS.md)')
-    a = p.parse_args(); print(report(a.run_dir.resolve(), a.notes, a.baseline_run and a.baseline_run.resolve(), a.out))
+    p.add_argument('--fusion-runs', type=Path, nargs='*', default=[],
+                   help='finished runs of other fusion values (or fusion-1 baselines) for the fusion table (read only)')
+    a = p.parse_args(); print(report(a.run_dir.resolve(), a.notes, a.baseline_run and a.baseline_run.resolve(), a.out,
+                                     [r.resolve() for r in a.fusion_runs]))

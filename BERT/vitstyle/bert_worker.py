@@ -38,6 +38,14 @@ def main():
         import torch
         import furiosa.torch as ft
         import transformers
+        # PE fusion: set_fusion must be called exactly once per process, before any device/stream/model use.
+        if cfg.get('fusion') is not None:
+            fusion = ft.set_fusion(cfg['fusion'])
+            r['fusion_requested'] = cfg['fusion']
+            r['fusion'] = {k: getattr(fusion, k) for k in ['num_fusion', 'num_pe_per_cluster', 'num_chips', 'num_clusters_per_chip']}
+            if fusion.num_fusion != cfg['fusion']: raise RuntimeError('set_fusion returned a different num_fusion than requested')
+        else:
+            r['fusion_requested'] = None   # SDK default; effective value is in effective.device_configuration
         from bert_model import load_model, encode, inputs_hash, sentence_indices, SENTENCES, SEQ_LEN, ID_DTYPE
         dev = torch.device(cfg['device'])
         if not ft.is_available() or cfg['device'] not in ft.get_available_devices(): raise RuntimeError('Allowed device unavailable')

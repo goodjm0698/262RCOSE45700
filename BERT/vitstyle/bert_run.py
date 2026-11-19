@@ -10,6 +10,8 @@ reason '이전 세트 실패로 건너뜀', skipped_because=<failed case_id>.
 Usage:
   python bert_run.py run                                  # new run dir, performance stage (B1..B16, 3 trials)
   python bert_run.py run --batches 32,64 --trials 1       # same settings, other batches / trial count
+  python bert_run.py run --fusion 2 --batches 1,16,64 --trials 1
+                                                          # PE fusion: worker calls furiosa.torch.set_fusion(2) once
   python bert_run.py resume --run-dir runs/ID --stage outcmp|cumulative
   python bert_run.py analyze --run-dir runs/ID
 If another process is on the NPU the worker is held and the orchestrator stops (exit 3).
@@ -32,6 +34,7 @@ STAGES = ['performance', 'outcmp', 'cumulative']
 FAILED = ['error', 'timeout']   # a (mode, batch) with one of these is skipped in later trials
 SKIP_REASON = '이전 세트 실패로 건너뜀'
 BATCHES = [1, 2, 4, 8, 16]   # default for `run`; length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
+FUSIONS = [1, 2, 4, 8]       # furiosa.torch.Fusion: 1/2/4 hardware-fused PEs in one cluster, 8 = software fusion (one chip)
 
 
 class NPUBusy(Exception):
@@ -64,7 +67,9 @@ def fresh(a):
     from bert_math import NUMERIC_RULE
     cfg = dict(run_id=run.name, model='textattack/bert-base-uncased-SST-2', seq_len=128, device=a.device,
                dtype='torch.bfloat16', id_dtype='torch.int32', cpu_fallback=False, mask='create_bidirectional_mask passthrough + CPU 4D additive BF16 mask (step4_compare.py)',
-               pe='SDK default (not set); recorded per worker as effective.device_configuration',
+               pe=('SDK default (not set); recorded per worker as effective.device_configuration' if a.fusion is None else
+                   f'furiosa.torch.set_fusion({a.fusion}) once per worker before any device use; effective value recorded per worker'),
+               fusion=a.fusion,
                cache_policy='fresh_process_private_sdk_cache_initially_absent_system_cold_unverified',
                timer='current_stream.synchronize(); perf_counter_ns; runner(**inputs); current_stream.synchronize()',
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
@@ -187,9 +192,11 @@ def main():
     p.add_argument('--batches', type=lambda s: sorted({int(b) for b in s.split(',')}), default=BATCHES,
                    help='run only: comma-separated batch sizes (default 1,2,4,8,16)')
     p.add_argument('--trials', type=int, default=3, help='run only: independent sets per (mode, batch) (default 3)')
+    p.add_argument('--fusion', type=int, choices=FUSIONS, default=None,
+                   help='run only: PEs fused into furiosa:0 via furiosa.torch.set_fusion (default: not set = SDK default)')
     a = p.parse_args()
-    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3):
-        p.error('--batches/--trials apply only to `run`; resume/analyze use the run\'s config.json')
+    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3 or a.fusion is not None):
+        p.error('--batches/--trials/--fusion apply only to `run`; resume/analyze use the run\'s config.json')
     if a.trials < 1 or min(a.batches) < 1: p.error('--trials and batch sizes must be >= 1')
     run = fresh(a) if a.action == 'run' else a.run_dir.resolve()
     print('BERT_RUN '+str(run), flush=True)

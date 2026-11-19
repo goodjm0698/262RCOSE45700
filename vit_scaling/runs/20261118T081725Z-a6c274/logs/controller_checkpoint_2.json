@@ -1,5 +1,0 @@
-{
-  "controller_pid": 58060,
-  "reason": "Apply balanced PE ordering and stability budget reservation after completed baseline",
-  "worker_terminated": false
-}

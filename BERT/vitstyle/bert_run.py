@@ -10,7 +10,7 @@ reason '이전 세트 실패로 건너뜀', skipped_because=<failed case_id>.
 Usage:
   python bert_run.py run                                  # new run dir, performance stage (B1..B16, 3 trials)
   python bert_run.py run --batches 32,64 --trials 1       # same settings, other batches / trial count
-  python bert_run.py run --fusion 2 --batches 1,16,64 --trials 1
+  python bert_run.py run --fusion 2 --modes compile --batches 1,16,64 --trials 1
                                                           # PE fusion: worker calls furiosa.torch.set_fusion(2) once
   python bert_run.py resume --run-dir runs/ID --stage outcmp|cumulative
   python bert_run.py analyze --run-dir runs/ID
@@ -34,6 +34,7 @@ STAGES = ['performance', 'outcmp', 'cumulative']
 FAILED = ['error', 'timeout']   # a (mode, batch) with one of these is skipped in later trials
 SKIP_REASON = '이전 세트 실패로 건너뜀'
 BATCHES = [1, 2, 4, 8, 16]   # default for `run`; length 128, int32 ids, CPU 4D mask; batch B uses step4 sentences 1..B
+MODES = ['eager', 'compile']
 FUSIONS = [1, 2, 4, 8]       # furiosa.torch.Fusion: 1/2/4 hardware-fused PEs in one cluster, 8 = software fusion (one chip)
 
 
@@ -69,7 +70,7 @@ def fresh(a):
                dtype='torch.bfloat16', id_dtype='torch.int32', cpu_fallback=False, mask='create_bidirectional_mask passthrough + CPU 4D additive BF16 mask (step4_compare.py)',
                pe=('SDK default (not set); recorded per worker as effective.device_configuration' if a.fusion is None else
                    f'furiosa.torch.set_fusion({a.fusion}) once per worker before any device use; effective value recorded per worker'),
-               fusion=a.fusion,
+               fusion=a.fusion, modes=a.modes,
                cache_policy='fresh_process_private_sdk_cache_initially_absent_system_cold_unverified',
                timer='current_stream.synchronize(); perf_counter_ns; runner(**inputs); current_stream.synchronize()',
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
@@ -89,16 +90,16 @@ def fresh(a):
     def order(trial):
         bs = list(cfg['batches']) if trial % 3 != 0 else list(reversed(cfg['batches']))
         first = ['eager', 'compile'] if trial % 3 != 2 else ['compile', 'eager']
-        return [(mode, b) for i, b in enumerate(bs) for mode in (first if i % 2 == 0 else first[::-1])]
+        return [(mode, b) for i, b in enumerate(bs) for mode in (first if i % 2 == 0 else first[::-1]) if mode in cfg['modes']]
     for trial in range(1, cfg['trials']+1):
         for mode, b in order(trial): add('performance', mode, b, trial)
     for b in cfg['batches']:
-        for mode in ['eager', 'compile']: add('outcmp', mode, b)
+        for mode in cfg['modes']: add('outcmp', mode, b)
     for b in cfg['batches']:
-        for mode in ['eager', 'compile']: add('cumulative', mode, b, status='not_planned')
+        for mode in cfg['modes']: add('cumulative', mode, b, status='not_planned')
     m = dict(run_id=run.name, created_utc=now(), command=[sys.executable, *sys.argv], status='ready', workers=workers,
              npu_budget_used_s=0, execution_order=[], resume_history=[], code_sha256={n: sha256(HERE/n) for n in SOURCES},
-             expected_performance_rows=2*len(cfg['batches'])*cfg['trials']*(1+cfg['warmup']+cfg['repeats']))
+             expected_performance_rows=len(cfg['modes'])*len(cfg['batches'])*cfg['trials']*(1+cfg['warmup']+cfg['repeats']))
     for n in SOURCES: shutil.copyfile(HERE/n, run/'code'/n)
     write_json(run/'manifest.json', m)
     tests = [sys.executable, '-m', 'unittest', 'discover', '-s', str(HERE/'tests'), '-p', 'test_math.py', '-v']
@@ -192,11 +193,14 @@ def main():
     p.add_argument('--batches', type=lambda s: sorted({int(b) for b in s.split(',')}), default=BATCHES,
                    help='run only: comma-separated batch sizes (default 1,2,4,8,16)')
     p.add_argument('--trials', type=int, default=3, help='run only: independent sets per (mode, batch) (default 3)')
+    p.add_argument('--modes', type=lambda s: [x for x in MODES if x in s.split(',')], default=MODES,
+                   help='run only: comma-separated subset of eager,compile (default both)')
     p.add_argument('--fusion', type=int, choices=FUSIONS, default=None,
                    help='run only: PEs fused into furiosa:0 via furiosa.torch.set_fusion (default: not set = SDK default)')
     a = p.parse_args()
-    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3 or a.fusion is not None):
-        p.error('--batches/--trials/--fusion apply only to `run`; resume/analyze use the run\'s config.json')
+    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3 or a.modes != MODES or a.fusion is not None):
+        p.error('--batches/--trials/--modes/--fusion apply only to `run`; resume/analyze use the run\'s config.json')
+    if not a.modes: p.error('--modes must name eager and/or compile')
     if a.trials < 1 or min(a.batches) < 1: p.error('--trials and batch sizes must be >= 1')
     run = fresh(a) if a.action == 'run' else a.run_dir.resolve()
     print('BERT_RUN '+str(run), flush=True)

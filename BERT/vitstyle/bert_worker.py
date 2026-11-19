@@ -52,6 +52,8 @@ def main():
         if torch._dynamo.config.suppress_errors or ft.backend.eager_fallback: raise RuntimeError('Error suppression/backend eager fallback must be disabled')
         cache = Path(spec['cache_path']); r.update(cache_path=str(cache), cache_existed_at_entry=cache.exists())
         if cache.exists(): raise RuntimeError('Never reuse or delete an existing worker cache')
+        if cfg.get('fusion') is not None and f'_f{cfg["fusion"]}' not in cache.name:
+            raise RuntimeError('Cache path must carry the fusion tag; compiled artifacts are fusion-specific')
         with ft.config.cpu_fallback(False), ft.config.cache_context(str(cache), summary=False), torch.inference_mode():
             r['effective'] = dict(cpu_fallback=ft.config.get_cpu_fallback(), device_configuration=str(ft.get_device_configuration()),
                 compiler_config=str(ft.config.get_compiler_config()), cache_config=str(ft.config.get_cache_config()),

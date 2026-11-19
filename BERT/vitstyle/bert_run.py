@@ -38,6 +38,12 @@ MODES = ['eager', 'compile']
 FUSIONS = [1, 2, 4, 8]       # furiosa.torch.Fusion: 1/2/4 hardware-fused PEs in one cluster, 8 = software fusion (one chip)
 
 
+def case_id(stage, mode, b, trial, fusion=None):
+    """Fusion is part of the case id, so its cache path (caches/<stage>/<case_id>) can never be shared
+    with a run of a different fusion value even if run directories were ever merged."""
+    return f'{stage}_{mode}_b{b}_t{trial}' + ('' if fusion is None else f'_f{fusion}')
+
+
 class NPUBusy(Exception):
     pass
 
@@ -81,7 +87,7 @@ def fresh(a):
     write_json(run/'config.json', cfg)
     workers = []
     def add(stage, mode, b, trial=1, status='not_run'):
-        cid = f'{stage}_{mode}_b{b}_t{trial}'
+        cid = case_id(stage, mode, b, trial, cfg['fusion'])
         workers.append(dict(case_id=cid, root_case_id=cid, stage=stage, mode=mode, batch=b, trial=trial,
                             status=status, target_calls=None, cache_path=str(run/'caches'/stage/cid)))
     # Rotation generalised from ViT: t1 batches ascending, eager first; t2 ascending, compile first;

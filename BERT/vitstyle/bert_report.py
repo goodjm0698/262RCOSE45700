@@ -91,9 +91,11 @@ def fusion_table(run, cfg, batches, others):
         used.setdefault(rid, []).append(f'fusion {fu} {mode} batch {b}')
     t += "출처 run: "+'; '.join(f"`{rid}` ({', '.join(v)})" for rid, v in used.items())+". 다른 run은 읽기만 함."
     if posid_runs:
-        t += (" `--posid-int32`로 측정한 run: "+', '.join(f'`{r}`' for r in sorted(posid_runs))
-              + " (position_ids를 int32 [1,L]로 명시해 넘김; 기본값인 모델의 int64 버퍼는 eager + fusion 2에서"
-                " aten.index.Tensor 컴파일 실패 — runs/20261124T065313Z-748779. CPU 기준 출력은 옵션 on/off가 비트 단위 동일).")
+        combos = {}
+        for (fu, mode, _), rid in sources.items():
+            if rid in posid_runs: combos.setdefault(mode, set()).add(fu)
+        t += ' '+'; '.join(f"{mode} fusion {'·'.join(str(fu) for fu in sorted(fus))}는 position_ids를 int32로 넘겨 측정 (`--posid-int32`)"
+                           for mode, fus in sorted(combos.items()))+'.'
     t += "\n\n"
     return t
 

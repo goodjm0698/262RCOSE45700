@@ -12,6 +12,7 @@ Usage:
   python bert_run.py run --batches 32,64 --trials 1       # same settings, other batches / trial count
   python bert_run.py run --fusion 2 --modes compile --batches 1,16,64 --trials 1
                                                           # PE fusion: worker calls furiosa.torch.set_fusion(2) once
+  python bert_run.py run --fusion 2 --posid-int32 ...     # pass explicit int32 position_ids (default: model's int64 buffer)
   python bert_run.py resume --run-dir runs/ID --stage outcmp|cumulative
   python bert_run.py analyze --run-dir runs/ID
 If another process is on the NPU the worker is held and the orchestrator stops (exit 3).
@@ -77,6 +78,9 @@ def fresh(a):
                pe=('SDK default (not set); recorded per worker as effective.device_configuration' if a.fusion is None else
                    f'furiosa.torch.set_fusion({a.fusion}) once per worker before any device use; effective value recorded per worker'),
                fusion=a.fusion, modes=a.modes,
+               # posid_int32: encode adds explicit int32 position_ids [1,L]; off = model's own int64 buffer
+               # (eager + fusion 2 fails to compile its aten.index: runs/20261124T065313Z-748779)
+               posid_int32=a.posid_int32,
                cache_policy='fresh_process_private_sdk_cache_initially_absent_system_cold_unverified',
                timer='current_stream.synchronize(); perf_counter_ns; runner(**inputs); current_stream.synchronize()',
                numeric_rule=NUMERIC_RULE, atol=None, rtol=None,
@@ -203,9 +207,11 @@ def main():
                    help='run only: comma-separated subset of eager,compile (default both)')
     p.add_argument('--fusion', type=int, choices=FUSIONS, default=None,
                    help='run only: PEs fused into furiosa:0 via furiosa.torch.set_fusion (default: not set = SDK default)')
+    p.add_argument('--posid-int32', action='store_true',
+                   help='run only: pass position_ids explicitly as int32 [1,L] (default: model uses its own int64 buffer)')
     a = p.parse_args()
-    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3 or a.modes != MODES or a.fusion is not None):
-        p.error('--batches/--trials/--modes/--fusion apply only to `run`; resume/analyze use the run\'s config.json')
+    if a.action != 'run' and (a.batches != BATCHES or a.trials != 3 or a.modes != MODES or a.fusion is not None or a.posid_int32):
+        p.error('--batches/--trials/--modes/--fusion/--posid-int32 apply only to `run`; resume/analyze use the run\'s config.json')
     if not a.modes: p.error('--modes must name eager and/or compile')
     if a.trials < 1 or min(a.batches) < 1: p.error('--trials and batch sizes must be >= 1')
     run = fresh(a) if a.action == 'run' else a.run_dir.resolve()

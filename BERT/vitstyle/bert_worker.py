@@ -28,6 +28,7 @@ def main():
     ev = Events(folder/'events.jsonl'); stage = spec['stage']; B = spec['batch']
     r = dict(**{k: spec[k] for k in ['case_id', 'stage', 'mode', 'batch', 'trial']}, status='running', started_utc=now(),
              timings=[], outputs={}, output_checks={}, output_valid=False, dtype='torch.bfloat16',
+             posid_int32=cfg.get('posid_int32', False),
              cache_state=CACHE_POLICY, timing_scope=TIMING_SCOPE, compiler_time_ms=None,
              script_sha256=sha256(Path(__file__)), inference_mode=True, active_call=None)
     def save(): write_json(folder/'result.json', r)
@@ -67,15 +68,17 @@ def main():
             r['attn_implementation'] = model.config._attn_implementation
             if any(p.dtype != torch.bfloat16 for p in model.parameters()): raise RuntimeError('All parameters must be BF16')
             idx = sentence_indices(stage, B); sents = [SENTENCES[i] for i in idx]   # B > 16 reuses sentences cyclically
-            chunks_cpu = [encode(tok, sents[i:i+B]) for i in range(0, len(sents), B)]
-            if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in ['input_ids', 'token_type_ids']):
-                raise RuntimeError('input_ids/token_type_ids must be '+cfg['id_dtype'])
+            # posid_int32: explicit int32 position_ids [1,L] in every chunk (default: model's own int64 buffer)
+            id_keys = ['input_ids', 'token_type_ids'] + (['position_ids'] if cfg.get('posid_int32') else [])
+            chunks_cpu = [encode(tok, sents[i:i+B], posid_int32=cfg.get('posid_int32', False)) for i in range(0, len(sents), B)]
+            if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in id_keys):
+                raise RuntimeError('/'.join(id_keys)+' must be '+cfg['id_dtype'])
             r['input_hash'] = inputs_hash(chunks_cpu[0]) if stage != 'outcmp' else None
             r['input_hashes'] = [inputs_hash(c) for c in chunks_cpu]
             r['valid_tokens'] = [c['valid_tokens'] for c in chunks_cpu]
             r['sentence_indices'] = idx
             model = model.to(dev)
-            chunks = [{k: c[k].to(dev) for k in ['input_ids', 'token_type_ids', 'attention_mask']} for c in chunks_cpu]
+            chunks = [{k: c[k].to(dev) for k in id_keys + ['attention_mask']} for c in chunks_cpu]
             stream = ft.current_stream(cfg['device']); stream.synchronize()
             if not stream.query(): raise RuntimeError('Official completion query failed')
             r.update(model_input_prepare_ms=(time.perf_counter_ns()-start)/1e6, sync_checked=True,

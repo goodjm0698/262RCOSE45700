@@ -61,23 +61,29 @@ def sentence_indices(stage, batch):
     return [i % len(SENTENCES) for i in range(n)]
 
 
-def encode(tok, sentences):
+def encode(tok, sentences, posid_int32=False):
     """CPU tensors: real sentences padded to 128, BF16 additive 4D mask.
 
     input_ids/token_type_ids are int32 for every batch. With int64 and batch>1 the embedding
     aten.index.Tensor fails NPU compilation in both eager and compile; int32 succeeds
     (runs/b4_probe_20261110_075109/results.jsonl, cases 2/3, 6/7, 8/9).
+    posid_int32: also pass position_ids explicitly as int32 [1,L] (same values as the model's
+    own int64 buffer slice, which eager + fusion 2 fails to compile:
+    runs/20261124T065313Z-748779). Default False keeps the model's buffer untouched.
     """
     import torch
     x = tok(sentences, padding='max_length', max_length=SEQ_LEN, truncation=True, return_tensors='pt')
-    return dict(input_ids=x['input_ids'].to(torch.int32), token_type_ids=x['token_type_ids'].to(torch.int32),
-                attention_mask=additive_mask(x['attention_mask'], torch.bfloat16),
-                valid_tokens=[int(v) for v in x['attention_mask'].sum(1)])
+    out = dict(input_ids=x['input_ids'].to(torch.int32), token_type_ids=x['token_type_ids'].to(torch.int32),
+               attention_mask=additive_mask(x['attention_mask'], torch.bfloat16),
+               valid_tokens=[int(v) for v in x['attention_mask'].sum(1)])
+    if posid_int32:
+        out['position_ids'] = torch.arange(SEQ_LEN, dtype=torch.int32).unsqueeze(0)
+    return out
 
 
 def inputs_hash(inputs):
     h = hashlib.sha256()
-    for k in ['input_ids', 'token_type_ids', 'attention_mask']:
+    for k in ['input_ids', 'token_type_ids', 'attention_mask'] + (['position_ids'] if 'position_ids' in inputs else []):
         t = inputs[k].contiguous()
         h.update(json.dumps([k, str(t.dtype), list(t.shape)]).encode())
         h.update(t.view(__import__('torch').uint8).numpy().tobytes())

@@ -54,36 +54,47 @@ def run_fusion(cfg):
     return cfg.get('fusion') or 1
 
 
-def compile_stats(run):
-    """{batch: pooled compile repeat stats} of one finished run; files are only read."""
+def mode_stats(run):
+    """{(mode, batch): pooled repeat stats} of one finished run; files are only read."""
     be = read_json(Path(run)/'break_even_summary.json')
-    return {b['batch']: b['pooled_repeat_by_mode'].get('compile') for b in be['batches']
-            if b.get('pooled_repeat_by_mode', {}).get('compile', {}).get('mean_ms') is not None}
+    return {(mode, b['batch']): p for b in be['batches']
+            for mode, p in (b.get('pooled_repeat_by_mode') or {}).items()
+            if p and p.get('mean_ms') is not None}
 
 
 def fusion_table(run, cfg, batches, others):
-    """Compile repeat time per batch for every fusion value found in this run plus `others`.
-    Same (fusion, batch) in several runs: this run wins, otherwise the run listed last."""
-    cells = {}; sources = {}
+    """Repeat time per (batch, mode) for every fusion value found in this run plus `others`.
+    Same (fusion, mode, batch) in several runs: this run wins, otherwise the run listed last."""
+    cells = {}; sources = {}; posid_runs = set()
     runs = [Path(o) for o in others] + [Path(run)]
     for r in runs:
         rc = read_json(r/'config.json'); fu = run_fusion(rc)
-        for b, p in compile_stats(r).items():
-            cells[(fu, b)] = p; sources[(fu, b)] = rc['run_id']
-    fusions = sorted({fu for fu, _ in cells}); rows = []
+        for (mode, b), p in mode_stats(r).items():
+            cells[(fu, mode, b)] = p; sources[(fu, mode, b)] = rc['run_id']
+            if rc.get('posid_int32'): posid_runs.add(rc['run_id'])
+    fusions = sorted({fu for fu, _, _ in cells})
+    modes = [m for m in ['eager', 'compile'] if any(mo == m for _, mo, _ in cells)]
+    rows = []
     for b in sorted(batches):
-        base = cells.get((1, b)); row = [b]
-        for fu in fusions:
-            p = cells.get((fu, b)); row.append(msd(p))
-            if fu != 1: row.append('—' if not p or not base else f(base['mean_ms']/p['mean_ms'], 3))
-        rows.append(row)
-    headers = ['batch']+[h for fu in fusions for h in ([f'fusion {fu} compile 평균 ± SD (ms)']+([f'배속 (fusion 1 / fusion {fu})'] if fu != 1 else []))]
-    t = "## 표 6. PE fusion 비교 (compile 반복 시간)\n\n"+table(headers, rows)
+        for mode in modes:
+            base = cells.get((1, mode, b)); row = [b, mode]
+            for fu in fusions:
+                p = cells.get((fu, mode, b)); row.append(msd(p))
+                if fu != 1: row.append('—' if not p or not base else f(base['mean_ms']/p['mean_ms'], 3))
+            rows.append(row)
+    headers = ['batch', '모드']+[h for fu in fusions for h in ([f'fusion {fu} 평균 ± SD (ms)']+([f'배속 (fusion 1 / fusion {fu})'] if fu != 1 else []))]
+    t = "## 표 6. PE fusion 비교 (반복 시간)\n\n"+table(headers, rows)
     t += "fusion n = `furiosa.torch.set_fusion(n)`으로 PE n개를 `furiosa:0` 하나로 묶은 것. fusion 1은 SDK 기본값(PE 1개)임. "
-    t += "배속은 같은 batch의 fusion 1 평균을 해당 fusion 평균으로 나눈 값. 평균 ± SD의 n은 run마다 다를 수 있음(세트 수 × 반복 수). "
+    t += "배속은 같은 batch·모드의 fusion 1 평균을 해당 fusion 평균으로 나눈 값. 평균 ± SD의 n은 run마다 다를 수 있음(세트 수 × 반복 수). "
     used = {}
-    for (fu, b), rid in sorted(sources.items()): used.setdefault(rid, []).append(f'fusion {fu} batch {b}')
-    t += "출처 run: "+'; '.join(f"`{rid}` ({', '.join(v)})" for rid, v in used.items())+". 다른 run은 읽기만 함.\n\n"
+    for (fu, mode, b), rid in sorted(sources.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        used.setdefault(rid, []).append(f'fusion {fu} {mode} batch {b}')
+    t += "출처 run: "+'; '.join(f"`{rid}` ({', '.join(v)})" for rid, v in used.items())+". 다른 run은 읽기만 함."
+    if posid_runs:
+        t += (" `--posid-int32`로 측정한 run: "+', '.join(f'`{r}`' for r in sorted(posid_runs))
+              + " (position_ids를 int32 [1,L]로 명시해 넘김; 기본값인 모델의 int64 버퍼는 eager + fusion 2에서"
+                " aten.index.Tensor 컴파일 실패 — runs/20261124T065313Z-748779. CPU 기준 출력은 옵션 on/off가 비트 단위 동일).")
+    t += "\n\n"
     return t
 
 
@@ -106,6 +117,7 @@ def report(run, notes=None, baseline=None, out=None, fusion_runs=()):
           + (f"- PE: 별도 설정 없이 SDK 기본값 사용, `furiosa:0`. 실제 적용값은 `{devcfg.split(', Single')[0]})`라서 1 PE임\n" if cfg.get('fusion') is None else
              f"- PE: worker마다 장치 사용 전에 `furiosa.torch.set_fusion({cfg['fusion']})`을 한 번 호출하고 `furiosa:0` 사용. 실제 적용값은 `{devcfg.split(', Single')[0]})`\n")
           + (f"- 측정 모드: {cfg['modes']}만 측정함. 다른 모드의 칸은 비어 있음\n" if cfg.get('modes') not in (None, ['eager', 'compile']) else '')
+          + (f"- position_ids: encode가 int32 [1,{cfg['seq_len']}]로 만들어 명시적으로 넘김 (`--posid-int32`). 다른 run은 모델의 int64 버퍼 사용\n" if cfg.get('posid_int32') else '')
           + f"- 한 번 실행할 때마다 첫 호출 1회 + 워밍업 {cfg['warmup']}회 + 반복 {cfg['repeats']}회. 조건마다 새 프로세스로 {cfg['trials']}세트 실행함. 실행 순서는 회차마다 바꿈\n"
           f"- 대표값: 반복 {cfg['trials']*cfg['repeats']}회(세트 {cfg['trials']}개 × {cfg['repeats']}회)를 모두 모은 평균 ± 표준편차. 중앙값과 세트별 평균도 같이 적음. 정상 종료한 세트만 포함함\n"
           f"- 첫 호출은 성능 비교에서 빼고 기록만 함. 첫 호출·워밍업 합·A는 세트 {cfg['trials']}개의 중앙값 (min~max)\n"

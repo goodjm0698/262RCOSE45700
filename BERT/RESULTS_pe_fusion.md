@@ -74,13 +74,16 @@ N은 첫 호출과 워밍업 10회를 마친 뒤 추가로 호출한 횟수임. 
 
 허용 오차 기준은 아직 정하지 않았으므로 합격 판정은 하지 않음(pending). BERT logits는 2차원이라 cosine이 높게 나오기 쉬움.
 
-## 표 6. PE fusion 비교 (compile 반복 시간)
+## 표 6. PE fusion 비교 (반복 시간)
 
-| batch | fusion 1 compile 평균 ± SD (ms) | fusion 2 compile 평균 ± SD (ms) | 배속 (fusion 1 / fusion 2) | fusion 4 compile 평균 ± SD (ms) | 배속 (fusion 1 / fusion 4) |
-|---|---|---|---|---|---|
-| 1 | 2.029 ± 0.024 | 1.649 ± 0.013 | 1.230 | 1.388 ± 0.012 | 1.462 |
-| 16 | 17.481 ± 0.021 | 10.821 ± 0.053 | 1.615 | 7.826 ± 0.012 | 2.234 |
-| 64 | 74.441 ± 0.018 | 34.754 ± 0.012 | 2.142 | 22.326 ± 0.048 | 3.334 |
+| batch | 모드 | fusion 1 평균 ± SD (ms) | fusion 2 평균 ± SD (ms) | 배속 (fusion 1 / fusion 2) | fusion 4 평균 ± SD (ms) | 배속 (fusion 1 / fusion 4) |
+|---|---|---|---|---|---|---|
+| 1 | eager | 18.921 ± 0.284 | 18.806 ± 0.359 | 1.006 | 18.828 ± 0.123 | 1.005 |
+| 1 | compile | 2.029 ± 0.024 | 1.649 ± 0.013 | 1.230 | 1.388 ± 0.012 | 1.462 |
+| 16 | eager | 25.307 ± 0.069 | 18.833 ± 0.109 | 1.344 | 18.716 ± 0.131 | 1.352 |
+| 16 | compile | 17.481 ± 0.021 | 10.821 ± 0.053 | 1.615 | 7.826 ± 0.012 | 2.234 |
+| 64 | eager | 88.265 ± 0.028 | 48.860 ± 0.059 | 1.806 | 31.759 ± 0.058 | 2.779 |
+| 64 | compile | 74.441 ± 0.018 | 34.754 ± 0.012 | 2.142 | 22.326 ± 0.048 | 3.334 |
 
-fusion n = `furiosa.torch.set_fusion(n)`으로 PE n개를 `furiosa:0` 하나로 묶은 것. fusion 1은 SDK 기본값(PE 1개)임. 배속은 같은 batch의 fusion 1 평균을 해당 fusion 평균으로 나눈 값. 평균 ± SD의 n은 run마다 다를 수 있음(세트 수 × 반복 수). 출처 run: `20261110T140237Z-61d998` (fusion 1 batch 1, fusion 1 batch 2, fusion 1 batch 4, fusion 1 batch 8, fusion 1 batch 16); `20261113T051434Z-fe0cc4` (fusion 1 batch 32, fusion 1 batch 64); `20261119T030722Z-d74488` (fusion 2 batch 1, fusion 2 batch 16, fusion 2 batch 64); `20261119T032413Z-616241` (fusion 4 batch 1, fusion 4 batch 16, fusion 4 batch 64). 다른 run은 읽기만 함.
+fusion n = `furiosa.torch.set_fusion(n)`으로 PE n개를 `furiosa:0` 하나로 묶은 것. fusion 1은 SDK 기본값(PE 1개)임. 배속은 같은 batch·모드의 fusion 1 평균을 해당 fusion 평균으로 나눈 값. 평균 ± SD의 n은 run마다 다를 수 있음(세트 수 × 반복 수). 출처 run: `20261110T140237Z-61d998` (fusion 1 compile batch 1, fusion 1 compile batch 2, fusion 1 compile batch 4, fusion 1 compile batch 8, fusion 1 compile batch 16, fusion 1 eager batch 1, fusion 1 eager batch 2, fusion 1 eager batch 4, fusion 1 eager batch 8, fusion 1 eager batch 16); `20261113T051434Z-fe0cc4` (fusion 1 compile batch 32, fusion 1 compile batch 64, fusion 1 eager batch 32, fusion 1 eager batch 64); `20261119T030722Z-d74488` (fusion 2 compile batch 1, fusion 2 compile batch 16, fusion 2 compile batch 64); `20261124T071938Z-c098d8` (fusion 2 eager batch 1, fusion 2 eager batch 16, fusion 2 eager batch 64); `20261119T032413Z-616241` (fusion 4 compile batch 1, fusion 4 compile batch 16, fusion 4 compile batch 64); `20261124T065337Z-7689b5` (fusion 4 eager batch 1, fusion 4 eager batch 16, fusion 4 eager batch 64). 다른 run은 읽기만 함. `--posid-int32`로 측정한 run: `20261124T071938Z-c098d8` (position_ids를 int32 [1,L]로 명시해 넘김; 기본값인 모델의 int64 버퍼는 eager + fusion 2에서 aten.index.Tensor 컴파일 실패 — runs/20261124T065313Z-748779. CPU 기준 출력은 옵션 on/off가 비트 단위 동일).
 

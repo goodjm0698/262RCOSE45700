@@ -148,12 +148,12 @@ def analyze_cumulative(run, cfg, m, by_batch, outputs):
         ws = [find_case(m, 'cumulative', mode, batch) for mode in ['eager', 'compile']]
         rs = [result_for(run, w) for w in ws]; cs = [initial_and_work(r, cfg['warmup']) for r in rs]
         output = next(x for x in outputs if (x['stage'], x['batch']) == ('cumulative', batch))
-        summary = dict(batch=batch, status='predicted_only', prediction_source_trial=trial, planned_N=ws[0].get('target_calls'),
+        summary = dict(batch=batch, status='predicted_only', prediction_source_trial=trial, planned_N=(ws[0] or {}).get('target_calls'),
                        first_observed_compile_advantage_N=None, final_winning_suffix_start_N=None, maintained_after_crossing=None,
                        transitions=[], completed_common_calls=0, primary_median_N=b['N_win']['median'],
                        primary_trial_N_range=[b['N_win']['minimum'], b['N_win']['maximum']],
                        validation_output_eligible=output['eligible'], reason='Cumulative workers not completed')
-        if trial and all(c['status'] == 'valid_prefix' for c in cs):
+        if trial and all(ws) and all(c['status'] == 'valid_prefix' for c in cs):
             e, c = cs; count = min(len(e['work']), len(c['work']))
             pc = [costs(result_for(run, find_case(m, 'performance', mode, batch, trial)), cfg['warmup'], cfg['repeats']) for mode in ['eager', 'compile']]
             obs = [e['A'], c['A']]; before = None; trans = []; first_win = None; last_entry = None
@@ -200,6 +200,8 @@ def plan_cumulative(run):
     oc = read_json(run/'output_comparison.json')['pairs']
     for batch in cfg.get('batches', [1, 4]):
         ws = [find_case(m, 'cumulative', mode, batch) for mode in ['eager', 'compile']]
+        if not all(ws):
+            plans.append(dict(batch=batch, status='predicted_only', reason='Both modes are required; this run measured '+str(cfg.get('modes')))); continue
         if any(w.get('started_utc') for w in ws):
             plans.append(dict(batch=batch, status='existing_plan_preserved', target_calls=ws[0].get('target_calls'))); continue
         paired = [v for v in be['trials'] if v['batch'] == batch]
@@ -262,7 +264,8 @@ def analyze(run):
     for b in batches:
         for trial in range(1, cfg['trials']+1):
             ws = [find_case(m, 'performance', mode, b, trial) for mode in ['eager', 'compile']]
-            cs = [comp.get(w['case_id'], dict(status='insufficient_data', reason='not run')) for w in ws]
+            cs = [comp.get(w['case_id'], dict(status='insufficient_data', reason='not run')) if w else
+                  dict(status='insufficient_data', reason='mode not in this run') for w in ws]
             pair = next(p for p in outputs if (p['stage'], p['batch'], p['trial']) == ('performance', b, trial))
             if pair['eligible'] and all(c['status'] == 'valid' for c in cs):
                 e, c = cs; v = solve(e['A'], c['A'], e['t'], c['t'], b, cfg['warmup'])
@@ -279,7 +282,7 @@ def analyze(run):
                     n = v['N_win']; assert G(e, n+1+cfg['warmup']) == T(e, n) and G(c, n+1+cfg['warmup']) == T(c, n)
             else:
                 v = solve(None, None, None, None, b, cfg['warmup']); v['reason'] = pair.get('reason') if not pair['eligible'] else str([c.get('reason') for c in cs])
-            v.update(run_id=cfg['run_id'], batch=b, trial=trial, eager_case_id=ws[0]['case_id'], compile_case_id=ws[1]['case_id'],
+            v.update(run_id=cfg['run_id'], batch=b, trial=trial, eager_case_id=ws[0] and ws[0]['case_id'], compile_case_id=ws[1] and ws[1]['case_id'],
                      output_validation_status='eligible_tolerance_pending' if pair['eligible'] else 'held')
             be.append(v)
     by_batch = []

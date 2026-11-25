@@ -28,6 +28,7 @@ def main():
     ev = Events(folder/'events.jsonl'); stage = spec['stage']; B = spec['batch']
     r = dict(**{k: spec[k] for k in ['case_id', 'stage', 'mode', 'batch', 'trial']}, status='running', started_utc=now(),
              timings=[], outputs={}, output_checks={}, output_valid=False, dtype='torch.bfloat16',
+             posid_int32=cfg.get('posid_int32', False),
              cache_state=CACHE_POLICY, timing_scope=TIMING_SCOPE, compiler_time_ms=None,
              script_sha256=sha256(Path(__file__)), inference_mode=True, active_call=None)
     def save(): write_json(folder/'result.json', r)
@@ -38,12 +39,22 @@ def main():
         import torch
         import furiosa.torch as ft
         import transformers
+        # PE fusion: set_fusion must be called exactly once per process, before any device/stream/model use.
+        if cfg.get('fusion') is not None:
+            fusion = ft.set_fusion(cfg['fusion'])
+            r['fusion_requested'] = cfg['fusion']
+            r['fusion'] = {k: getattr(fusion, k) for k in ['num_fusion', 'num_pe_per_cluster', 'num_chips', 'num_clusters_per_chip']}
+            if fusion.num_fusion != cfg['fusion']: raise RuntimeError('set_fusion returned a different num_fusion than requested')
+        else:
+            r['fusion_requested'] = None   # SDK default; effective value is in effective.device_configuration
         from bert_model import load_model, encode, inputs_hash, sentence_indices, SENTENCES, SEQ_LEN, ID_DTYPE
         dev = torch.device(cfg['device'])
         if not ft.is_available() or cfg['device'] not in ft.get_available_devices(): raise RuntimeError('Allowed device unavailable')
         if torch._dynamo.config.suppress_errors or ft.backend.eager_fallback: raise RuntimeError('Error suppression/backend eager fallback must be disabled')
         cache = Path(spec['cache_path']); r.update(cache_path=str(cache), cache_existed_at_entry=cache.exists())
         if cache.exists(): raise RuntimeError('Never reuse or delete an existing worker cache')
+        if cfg.get('fusion') is not None and f'_f{cfg["fusion"]}' not in cache.name:
+            raise RuntimeError('Cache path must carry the fusion tag; compiled artifacts are fusion-specific')
         with ft.config.cpu_fallback(False), ft.config.cache_context(str(cache), summary=False), torch.inference_mode():
             r['effective'] = dict(cpu_fallback=ft.config.get_cpu_fallback(), device_configuration=str(ft.get_device_configuration()),
                 compiler_config=str(ft.config.get_compiler_config()), cache_config=str(ft.config.get_cache_config()),
@@ -57,15 +68,17 @@ def main():
             r['attn_implementation'] = model.config._attn_implementation
             if any(p.dtype != torch.bfloat16 for p in model.parameters()): raise RuntimeError('All parameters must be BF16')
             idx = sentence_indices(stage, B); sents = [SENTENCES[i] for i in idx]   # B > 16 reuses sentences cyclically
-            chunks_cpu = [encode(tok, sents[i:i+B]) for i in range(0, len(sents), B)]
-            if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in ['input_ids', 'token_type_ids']):
-                raise RuntimeError('input_ids/token_type_ids must be '+cfg['id_dtype'])
+            # posid_int32: explicit int32 position_ids [1,L] in every chunk (default: model's own int64 buffer)
+            id_keys = ['input_ids', 'token_type_ids'] + (['position_ids'] if cfg.get('posid_int32') else [])
+            chunks_cpu = [encode(tok, sents[i:i+B], posid_int32=cfg.get('posid_int32', False)) for i in range(0, len(sents), B)]
+            if any(str(c[k].dtype) != ID_DTYPE or ID_DTYPE != cfg['id_dtype'] for c in chunks_cpu for k in id_keys):
+                raise RuntimeError('/'.join(id_keys)+' must be '+cfg['id_dtype'])
             r['input_hash'] = inputs_hash(chunks_cpu[0]) if stage != 'outcmp' else None
             r['input_hashes'] = [inputs_hash(c) for c in chunks_cpu]
             r['valid_tokens'] = [c['valid_tokens'] for c in chunks_cpu]
             r['sentence_indices'] = idx
             model = model.to(dev)
-            chunks = [{k: c[k].to(dev) for k in ['input_ids', 'token_type_ids', 'attention_mask']} for c in chunks_cpu]
+            chunks = [{k: c[k].to(dev) for k in id_keys + ['attention_mask']} for c in chunks_cpu]
             stream = ft.current_stream(cfg['device']); stream.synchronize()
             if not stream.query(): raise RuntimeError('Official completion query failed')
             r.update(model_input_prepare_ms=(time.perf_counter_ns()-start)/1e6, sync_checked=True,
